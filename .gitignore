@@ -1,0 +1,9 @@
+.env
+data/
+backups/
+*.vcf
+*.json.gz
+client_secret_*.json
+__pycache__/
+*.pyc
+compose.live.yaml

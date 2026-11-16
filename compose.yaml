@@ -1,0 +1,19 @@
+# Example compose. Copy .env.example to .env and fill it in.
+# The container needs outbound HTTPS to Microsoft and Google, and a port for its web page.
+services:
+  contact-sync:
+    image: local/contact-sync:0.1.0
+    build: .
+    container_name: contact-sync
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-UTC}
+      MS_CLIENT_ID: ${MS_CLIENT_ID:?set MS_CLIENT_ID in .env}
+      MS_TENANT: ${MS_TENANT:-organizations}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:?set GOOGLE_CLIENT_ID in .env}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:?set GOOGLE_CLIENT_SECRET in .env}
+      API_KEY: ${API_KEY:-}
+    volumes:
+      - ${DATA_PATH:-./data}:/data      # must be writable by uid 1000
+    ports:
+      - "${HOST_PORT:-8080}:80"
