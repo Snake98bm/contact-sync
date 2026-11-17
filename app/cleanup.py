@@ -316,7 +316,8 @@ def build_plan(progress=None):
                 detail += ("; " if detail else "") + "also written as: " + " | ".join(row["also"])
             add("address", p["name"] or "(no name)", detail, row["members"], row["ok"],
                 addr_type=a.get("type"), street_key=row["keys"][0], street_keys=row["keys"],
-                before=a, after=row["after"])
+                before=a, after=row["after"],
+                person=[{"side": c["side"], "id": c["id"], "name": c["name"]} for c in p["members"]])
 
     # labels
     groups = {name: rn for rn, name in names.items()}
@@ -376,7 +377,9 @@ def choices_from_form(plan_id, f, form_all):
         elif n in ticked:
             if i["kind"] == "combine":
                 out[n] = {"mode": "combine", "name": name}
-            elif i["kind"] == "address" and f(f"addr_{n}_remove"):
+            elif i["kind"] == "address" and f(f"addr_{n}_do") == "delete_contact":
+                out[n] = {"mode": "delete_contact"}
+            elif i["kind"] == "address" and (f(f"addr_{n}_remove") or f(f"addr_{n}_do") == "remove"):
                 out[n] = {"mode": "remove"}
             elif i["kind"] == "address":
                 fields = {k: (f(f"addr_{n}_{k}") or "").replace("\r\n", "\n").strip()
@@ -535,6 +538,19 @@ def _do_address(item, region, _names):
     new = {k: (fields.get(k) or "").strip() for k in ("street", "city", "region", "postal", "country")}
     if new["region"]:
         new["region"] = addr.state_code(new["region"])
+    if choice.get("mode") == "delete_contact":
+        # the whole person (every copy, both accounts) to the recycle bin; restorable from there
+        alive = []
+        for m in item.get("person") or item["members"]:
+            try:
+                _fresh(m)
+                alive.append(m)
+            except Exception:
+                continue                       # already gone (e.g. another row of this person deleted it)
+        if not alive:
+            return ""
+        writer.delete(alive, note="cleanup: contact deleted")
+        return f"contact deleted ({' and '.join(LABEL[m['side']] for m in alive)}), in the recycle bin"
     done = []
     for m in item["members"]:
         try:

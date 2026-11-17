@@ -35,7 +35,7 @@ tr:last-child td{border-bottom:0}td.num{font-variant-numeric:tabular-nums;white-
 .pill{display:inline-block;padding:1px 9px;border-radius:99px;font-size:12.5px;font-weight:600;white-space:nowrap}
 .p-ok{color:var(--ok);background:var(--okbg)}.p-warn{color:var(--warn);background:var(--warnbg)}
 .p-bad{color:var(--bad);background:var(--badbg)}.p-info{color:var(--info);background:var(--infobg)}
-.p-mute{color:var(--mute);background:var(--mutebg)}tr.person>td{border-bottom:none;padding-bottom:0}tr.sub>td:nth-child(2){padding-left:22px}.rm{display:block;margin-top:4px}tr:has(.rm input:checked) textarea,tr:has(.rm input:checked) .bar input{text-decoration:line-through;opacity:.5}tr.review>td{background:var(--warnbg)}tr.review:has(input:checked)>td{background:none}tr.review:has(input:checked) .p-warn{color:var(--ok);background:var(--okbg)}tr.review:has(input:checked) .rv:after{content:"ed"}.muted{color:var(--muted)}.small{font-size:13px}
+.p-mute{color:var(--mute);background:var(--mutebg)}tr.person>td{border-bottom:none;padding-bottom:0}tr.sub>td:nth-child(2){padding-left:22px}.rm{display:block;margin-top:4px}tr:has(.rm input:not([value=fix]):checked) textarea,tr:has(.rm input:not([value=fix]):checked) .bar input{text-decoration:line-through;opacity:.5}tr:has(.rm input[value=delete_contact]:checked)>td{background:var(--badbg)}tr.review>td{background:var(--warnbg)}tr.review:has(input:checked)>td{background:none}tr.review:has(input:checked) .p-warn{color:var(--ok);background:var(--okbg)}tr.review:has(input:checked) .rv:after{content:"ed"}.muted{color:var(--muted)}.small{font-size:13px}
 button,.btn{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:8px 14px;font:inherit;
 font-weight:600;cursor:pointer;text-decoration:none;display:inline-block}
 @media (prefers-color-scheme:dark){button,.btn{color:#0f1218}}
@@ -1119,8 +1119,12 @@ def _address_row(i, show_name=True):
         f"style='width:100%;max-width:420px;margin-top:4px' onchange=\"{tick}\">"
         f"{esc(a.get('street', ''))}</textarea><div class='bar'>{box('city', 'City', 140)}{box('region', 'State', 60)}"
         f"{box('postal', 'ZIP', 90)}{box('country', 'Country', 120)}</div>"
-        f"<label class='small rm'><input type='checkbox' name='addr_{n}_remove' value='1' "
-        f"onchange=\"if(this.checked){tick}\"> Remove this address instead</label></td>"
+        f"<div class='small rm'>"
+        + "".join(f"<label style='margin-right:14px'><input type='radio' name='addr_{n}_do' value='{v}'"
+                  f"{' checked' if v == 'fix' else ''} onchange=\"{tick}\"> {t}</label>"
+                  for v, t in (("fix", "Fix it"), ("remove", "Remove this address"),
+                               ("delete_contact", "Delete this contact (to the recycle bin)")))
+        + "</div></td>"
         f"<td class='small'>{esc(i['detail'])}</td></tr>")
 
 

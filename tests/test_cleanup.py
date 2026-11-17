@@ -304,6 +304,14 @@ def test_address_typed_two_ways_is_one_row():
     assert choice[rows[0]["id"]] == {"mode": "remove"}, choice
     msg = cleanup._do_address(dict(rows[0], choice=choice[rows[0]["id"]], street_keys=["7 Sample Rd"]), "US", {})
     assert "removed" in msg and not (MS["AAM-twin"].get("homeAddress") or {}).get("street"), MS["AAM-twin"]
+    # ...or delete the whole contact (to the recycle bin)
+    form = {f"addr_{rows[0]['id']}_do": "delete_contact"}
+    choice = cleanup.choices_from_form(plan_id, form.get, lambda k: [str(rows[0]["id"])] if k == "item" else [])
+    assert choice[rows[0]["id"]] == {"mode": "delete_contact"}, choice
+    msg = cleanup._do_address(dict(rows[0], choice=choice[rows[0]["id"]]), "US", {})
+    assert "AAM-twin" not in MS and "recycle bin" in msg, msg
+    assert any(b["name"] == "Twin Example" for b in writer.bin_items())
+    assert cleanup._do_address(dict(rows[0], choice=choice[rows[0]["id"]]), "US", {}) == ""   # already gone: no error
 
 
 if __name__ == "__main__":
