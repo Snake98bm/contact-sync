@@ -17,6 +17,7 @@ writer.py (history, recycle bin, write mode) and each item is re-read before it 
 """
 import html
 import json
+import re
 import logging
 import threading
 import time
@@ -65,6 +66,12 @@ def tidy(c, region="US"):
             reasons.append("remove “Contact Imported” block")
         else:
             reasons.append("keep “Contact Imported” block (its address isn't in the address fields)")
+    comp = (rec.get("company") or "").strip()
+    if comp and re.fullmatch(r"[\d\s().+\-]{7,}", comp) and len(re.sub(r"\D", "", comp)) >= 7:
+        # a phone number typed into the company box: move it to the phones
+        rec["company"] = ""
+        rec["phones"] = list(rec.get("phones") or []) + [{"value": comp, "type": "mobile"}]
+        reasons.append("move phone number out of the company field")
     phones, reformatted, dupes = [], False, 0
     for p in rec.get("phones") or []:
         e164, ext = clean.norm_phone(p["value"], region)
@@ -167,7 +174,7 @@ def build_plan():
     data, _, names = sync._fetch()
     region = store.load_settings().get("default_region", "US")
     contacts = [sync.common(s, raw, names) for s in sync.SIDES for raw in data[s].values()]
-    rep = clean.analyse(contacts, region)
+    rep = clean.analyse(contacts, region, sync.link_pairs())
     linked = {("microsoft", lk["ms_id"]) for lk in sync.links()} | {("google", lk["g_id"]) for lk in sync.links()}
     items = []
 

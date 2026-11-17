@@ -109,6 +109,25 @@ def test_bin_reasons_from_history():
     assert reasons[7] == "Sync: deleted in Microsoft 365" and reasons[8] == "Deleted from the Contacts page"
 
 
+def test_linked_copies_are_one_person():
+    a = c("microsoft", "m9", "Casey", "Example", company="5555550199")
+    b = c("google", "g9", "Casey", "Example", company="5555550199")
+    b["name"] = a["name"] = "Casey Example"
+    assert clean.analyse([a, b])["counts"]["paired"] == 0          # nothing shared...
+    r = clean.analyse([a, b], links=[("m9", "g9")])
+    assert r["counts"]["paired"] == 1 and r["counts"]["only_ms"] == 0   # ...but they're linked for sync
+
+
+def test_phone_number_in_company_field_moves_to_phones():
+    import cleanup
+    x = c("google", "g9", "Casey", "Example", company="5555550199")
+    rec, reasons, _ = cleanup.tidy(x)
+    assert rec["company"] == "" and [p["value"] for p in rec["phones"]] == ["(555) 555-0199"], rec
+    assert "move phone number out of the company field" in reasons
+    y = c("google", "g8", "Real", "Company", company="3M Company")
+    assert cleanup.tidy(y)[0]["company"] == "3M Company"                # a real company stays
+
+
 def test_photos_in_backups():
     import google
     import msgraph

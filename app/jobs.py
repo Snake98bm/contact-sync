@@ -72,7 +72,7 @@ class Runner:
         contacts = [c for p in r["people"] for c in p["members"]
                     if (c["side"], c["id"]) not in gone and (c["side"], c["id"]) not in new]
         contacts += list(new.values())
-        report = clean.analyse(contacts, store.load_settings().get("default_region", "US"))
+        report = clean.analyse(contacts, store.load_settings().get("default_region", "US"), _link_pairs())
         for k in ("created", "backup", "notes", "group_names"):
             report[k] = r.get(k)
         self.report = report
@@ -106,7 +106,7 @@ class Runner:
             self._step("Saving the backup")
             name = backup.save(raw_ms, raw_g, contacts, {"trigger": trigger, "notes": notes}, photos)
             self._step("Building the cleanup report")
-            report = clean.analyse(contacts, settings.get("default_region", "US"))
+            report = clean.analyse(contacts, settings.get("default_region", "US"), _link_pairs())
             report["created"] = time.time()
             report["backup"] = name
             report["notes"] = notes
@@ -138,3 +138,12 @@ class Runner:
                     return
                 except (OSError, ValueError):
                     continue
+
+
+def _link_pairs():
+    """(ms_id, g_id) of every sync link, so linked copies count as one person on the pages."""
+    try:
+        import sync
+        return sync.link_pairs()
+    except Exception:            # no sync tables yet
+        return []

@@ -154,7 +154,7 @@ def is_junk(c):
     return ""
 
 
-def analyse(contacts, region="US"):
+def analyse(contacts, region="US", links=()):
     """contacts: both sides in the common shape. Returns the report dict."""
     by_id = {(c["side"], c["id"]): c for c in contacts}
     uf = _UF()
@@ -170,6 +170,10 @@ def analyse(contacts, region="US"):
                 else:
                     shared.setdefault(k, set()).update({node, other})
             holders[k].append(node)
+    for ms_id, g_id in links or ():      # linked for sync = one person, whatever they share
+        a, b = ("microsoft", ms_id), ("google", g_id)
+        if a in by_id and b in by_id:
+            uf.union(a, b)
 
     groups = collections.defaultdict(list)
     for node in by_id:

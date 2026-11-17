@@ -91,6 +91,11 @@ def is_test(name):
     return (name or "").startswith(writer.TEST_PREFIX)
 
 
+def link_pairs():
+    """(ms_id, g_id) of every complete link."""
+    return [(lk["ms_id"], lk["g_id"]) for lk in store.q("SELECT ms_id, g_id FROM links") if lk["ms_id"] and lk["g_id"]]
+
+
 def links():
     return store.q("SELECT * FROM links")
 
