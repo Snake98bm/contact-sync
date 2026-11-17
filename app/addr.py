@@ -253,6 +253,7 @@ def fix(a, lookup=True, zip_city=None):
         city = (a.get("city") or "").strip() or (zip_city or {}).get((a.get("postal") or "")[:5], "")
         got = used = None
         guessed = False
+        failed = ""
         try:
             for v in variants(core):
                 q = dict(a, street=v, city=city)
@@ -280,8 +281,9 @@ def fix(a, lookup=True, zip_city=None):
         except Exception as e:
             log.warning("address lookup failed: %s", e)
             got = None
+            failed = str(e)[:120]
         if got:
-            filled = [k for k in ("city", "region", "postal") if not (a.get(k) or "").strip() and got.get(k)]
+            filled =[k for k in ("city", "region", "postal") if not (a.get(k) or "").strip() and got.get(k)]
             for k in filled:
                 a[k] = got[k]
             if filled:
@@ -297,6 +299,9 @@ def fix(a, lookup=True, zip_city=None):
                 how.append(("street type guessed: the Census Bureau knows it as " if guessed else
                             "street put in order as the Census Bureau knows it: ") + got["street"])
                 confident = False
+        elif failed:
+            how.append(f"the address lookup failed ({failed}): rebuild the plan later to try again")
+            confident = False
         elif needs_lookup(a):
             how.append("no match found: fill in by hand if you like")
             confident = False

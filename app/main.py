@@ -11,6 +11,7 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import addr
 import auth
 import backup
 import google
@@ -638,6 +639,7 @@ def main():
     writer.init()
     sync.init()
     cleanup.init()
+    addr.init()                      # the address-lookup cache (missing until 0.12.2: every lookup failed)
     writer.prune()
     store.x("UPDATE runs SET finished=started, error='Interrupted (container restarted)' WHERE finished IS NULL")
     if not os.path.exists(store.SETTINGS_PATH):

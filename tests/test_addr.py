@@ -149,6 +149,23 @@ def test_street_type_guess_and_city_from_zip():
         net.request = real
 
 
+def test_lookup_failure_is_reported_as_failure():
+    def boom(method, url, **kw):
+        raise TimeoutError("timed out")
+    real, net.request = net.request, boom
+    try:
+        a, how, ok = addr.fix(A("7 Example Rd", "Springfield", "CA", ""))
+        assert any("lookup failed" in h for h in how) and not any("no match" in h for h in how) and not ok, how
+    finally:
+        net.request = real
+
+
+def test_app_start_creates_the_lookup_table():
+    import inspect
+    import main
+    assert "addr.init()" in inspect.getsource(main.main)
+
+
 def test_incomplete_is_not_ticked():
     a, how, ok = addr.fix(A("1 Example St", "Springfield", "", ""), lookup=False)
     assert not ok
