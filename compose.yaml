@@ -1,8 +1,14 @@
 # Example compose. Copy .env.example to .env and fill it in.
 # The container needs outbound HTTPS to Microsoft and Google, and a port for its web page.
+#
+# Optional: on a macvlan network the container can get its address and register its name by DHCP.
+# Add to the service: user: "0:0", cap_drop: [ALL],
+#   cap_add: [NET_ADMIN, NET_RAW, NET_BIND_SERVICE, CHOWN, SETUID, SETGID],
+#   environment DHCP: "1" and DHCP_HOSTNAME: contact-sync, a fixed mac_address (so the lease stays
+#   the same), and drop the ports: section. The app itself still runs as uid 1000.
 services:
   contact-sync:
-    image: local/contact-sync:0.1.0
+    image: local/contact-sync:0.2.0
     build: .
     container_name: contact-sync
     restart: unless-stopped
@@ -13,7 +19,11 @@ services:
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:?set GOOGLE_CLIENT_ID in .env}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:?set GOOGLE_CLIENT_SECRET in .env}
       API_KEY: ${API_KEY:-}
+      # HTTPS with a self-signed certificate made on first start (10 years). Names on it:
+      TLS_NAMES: ${TLS_NAMES:-localhost}
+      PUBLIC_HTTPS_PORT: ${HOST_HTTPS_PORT:-8443}
     volumes:
       - ${DATA_PATH:-./data}:/data      # must be writable by uid 1000
     ports:
-      - "${HOST_PORT:-8080}:80"
+      - "${HOST_PORT:-8080}:80"         # redirects to HTTPS
+      - "${HOST_HTTPS_PORT:-8443}:443"

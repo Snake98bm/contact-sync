@@ -1,5 +1,6 @@
 """Server-rendered pages."""
 import html
+import json
 import time
 
 from version import VERSION
@@ -90,19 +91,96 @@ Contact Sync</div><nav>{nav}</nav></div></header><main class="wrap">{body}
 it never changes either account.</p></main>{js}</body></html>"""
 
 
-def login_page(setup, error="", nxt="/"):
-    if setup:
-        body = f"""<h1>Choose a password</h1><p class="sub">First visit: pick the password for this site.</p>
-{f'<div class="banner err">{esc(error)}</div>' if error else ''}
-<form method="post" action="/setup"><label>Password</label><input type="password" name="password" autofocus
-autocomplete="new-password"><label>Again</label><input type="password" name="password2" autocomplete="new-password">
-<p><button>Save</button></p></form>"""
-    else:
-        body = f"""<h1>Log in</h1>{f'<div class="banner err">{esc(error)}</div>' if error else ''}
-<form method="post" action="/login"><input type="hidden" name="next" value="{esc(nxt)}">
-<label>Password</label><input type="password" name="password" autofocus autocomplete="current-password">
-<p><button>Log in</button></p></form>"""
-    return page("Log in", "", body, nav_on=False)
+PASSKEY_JS = """<script>
+const b64u=b=>btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,'');
+const unb64u=s=>Uint8Array.from(atob(s.replace(/-/g,'+').replace(/_/g,'/')+'='.repeat((4-s.length%4)%4)),c=>c.charCodeAt(0));
+async function post(url,data){const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},
+body:JSON.stringify(data||{})});const j=await r.json().catch(()=>({error:'Unexpected reply ('+r.status+')'}));
+if(!r.ok)throw new Error(j.error||('Error '+r.status));return j}
+function say(msg,bad){const e=document.getElementById('msg');e.textContent=msg;e.className='banner'+(bad?' err':'');e.hidden=!msg}
+function supported(){if(!window.isSecureContext||!window.PublicKeyCredential){say('This browser can\\'t use passkeys here. '+
+'Install the certificate first (see the link below), then open this site again.',true);return false}return true}
+function nice(e){if(e&&e.name==='NotAllowedError')return 'Cancelled or timed out. Try again.';
+if(e&&e.name==='InvalidStateError')return 'This device already has a passkey for this site.';return (e&&e.message)||String(e)}
+async function addPasskey(code,name){
+  const o=await post('/auth/register/options',{code});
+  o.challenge=unb64u(o.challenge);o.user.id=unb64u(o.user.id);
+  o.excludeCredentials=(o.excludeCredentials||[]).map(c=>({...c,id:unb64u(c.id)}));
+  const c=await navigator.credentials.create({publicKey:o});
+  return post('/auth/register',{name,clientDataJSON:b64u(c.response.clientDataJSON),
+    attestationObject:b64u(c.response.attestationObject)});
+}
+async function signIn(next){
+  const o=await post('/auth/login/options');
+  o.challenge=unb64u(o.challenge);o.allowCredentials=(o.allowCredentials||[]).map(c=>({...c,id:unb64u(c.id)}));
+  const a=await navigator.credentials.get({publicKey:o});
+  return post('/auth/login',{next,id:a.id,clientDataJSON:b64u(a.response.clientDataJSON),
+    authenticatorData:b64u(a.response.authenticatorData),signature:b64u(a.response.signature)});
+}
+function guessName(){const u=navigator.userAgent;return /iPhone/.test(u)?'iPhone':/iPad/.test(u)?'iPad':
+/Android/.test(u)?'Android phone':/Windows/.test(u)?'Windows PC':/Mac/.test(u)?'Mac':'Passkey'}
+</script>"""
+
+
+def setup_page(origin):
+    body = f"""<h1>Set up your passkey</h1>
+<p class="sub">This site signs you in with a passkey (Windows Hello, your phone, or a security key) instead of a
+password. You'll add the first one now.</p>
+<div id="msg" class="banner" hidden></div>
+<label>Setup code</label><input type="text" id="code" autocomplete="off" autocapitalize="characters"
+style="width:200px;text-transform:uppercase;letter-spacing:.1em" placeholder="ABCD2345">
+<div class="hint">A one-time code printed in the container's log (Dockhand → contact-sync → Logs). It stops
+working once the first passkey exists.</div>
+<label>Name for this passkey</label><input type="text" id="name" maxlength="60">
+<p><button id="go">Create passkey</button></p>
+<p class="small"><a href="/cert">Install this site's certificate</a> first if your browser shows a warning.</p>
+{PASSKEY_JS}<script>
+document.getElementById('name').value=guessName();
+document.getElementById('go').onclick=async()=>{{if(!supported())return;say('Follow your device\\'s prompt…');
+try{{await addPasskey(document.getElementById('code').value,document.getElementById('name').value);location.href='/'}}
+catch(e){{say(nice(e),true)}}}};supported();</script>"""
+    return page("Set up", "", body, nav_on=False)
+
+
+def login_page(nxt="/"):
+    body = f"""<h1>Sign in</h1><p class="sub">Use your passkey.</p>
+<div id="msg" class="banner" hidden></div>
+<p><button id="go">Sign in with a passkey</button></p>
+<p class="small"><a href="/cert">Install this site's certificate</a> on a new device first.</p>
+<p class="muted small">Lost every passkey? Delete <code>auth.json</code> in the container's data folder and
+restart it; a new setup code is printed in the log.</p>
+{PASSKEY_JS}<script>
+const nxt={json.dumps(nxt).replace("<", "\\u003c")};
+async function go(){{if(!supported())return;say('');try{{const r=await signIn(nxt);location.href=r.next||'/'}}
+catch(e){{say(nice(e),true)}}}}
+document.getElementById('go').onclick=go;</script>"""
+    return page("Sign in", "", body, nav_on=False)
+
+
+def cert_page(fingerprint, host, origin):
+    body = f"""<h1>Install the certificate</h1>
+<p class="sub">This site uses its own private certificate authority instead of a public one. Install it once on
+each device you use. Browsers then trust <b>{esc(origin)}</b> with no warning, which passkeys need. It is limited
+to this site's names, so it can't vouch for any other website.</p>
+<p><a class="btn" href="/ca.crt">Download the certificate</a></p>
+<p class="small">Check it before trusting it. SHA-256 fingerprint:<br><code class="break">{esc(fingerprint)}</code></p>
+<h2>Windows</h2><ol class="small">
+<li>Open the downloaded <code>contact-sync-ca.crt</code> → <b>Install Certificate…</b></li>
+<li>Store location: <b>Current User</b> → Next.</li>
+<li><b>Place all certificates in the following store</b> → Browse → <b>Trusted Root Certification Authorities</b> → OK → Next → Finish.</li>
+<li>Accept the security warning (check the fingerprint matches), then fully close and reopen the browser.</li></ol>
+<h2>iPhone / iPad</h2><ol class="small">
+<li>Open this page in <b>Safari</b> and tap the download button → <b>Allow</b>.</li>
+<li>Settings → <b>Profile Downloaded</b> → Install.</li>
+<li>Settings → General → About → <b>Certificate Trust Settings</b> → turn on <b>contact-sync local CA</b>.</li></ol>
+<h2>Android</h2><ol class="small">
+<li>Download the file, then Settings → Security → More security settings → Encryption &amp; credentials →
+<b>Install a certificate</b> → <b>CA certificate</b> → pick the file.</li></ol>
+<h2>Mac</h2><ol class="small">
+<li>Open the file → Keychain Access adds it to <b>login</b>.</li>
+<li>Double-click it there → Trust → <b>When using this certificate: Always Trust</b>.</li></ol>
+<p><a href="{esc(origin)}/">Go to the site</a></p>"""
+    return page("Certificate", "", body, nav_on=False)
 
 
 STATE = {"ok": ("Signed in", "ok"), "signed_out": ("Not signed in", "warn"),
@@ -307,8 +385,13 @@ def backups_page(items):
     return page("Backups", "/backups", body)
 
 
-def settings_page(s, saved=False, error=""):
+def settings_page(s, passkeys, saved=False, error="", cert=""):
     chk = lambda k: " checked" if s[k] else ""
+    rows = "".join(
+        f"<tr><td>{esc(p['name'])}</td><td class='num'>{when(p['created'])}</td><td class='num'>{when(p['last_used'])}</td>"
+        f"<td><form method='post' action='/passkeys/remove' class='inline' onsubmit=\"return confirm('Remove this passkey?')\">"
+        f"<input type='hidden' name='id' value='{esc(p['id'])}'><button class='ghost'>Remove</button></form></td></tr>"
+        for p in passkeys)
     body = f"""<h1>Settings</h1>{'<div class="banner">Saved.</div>' if saved else ''}
 {f'<div class="banner err">{esc(error)}</div>' if error else ''}
 <form method="post" action="/settings">
@@ -318,13 +401,23 @@ def settings_page(s, saved=False, error=""):
 <label>Country for phone numbers without a code</label><input type="text" name="default_region" maxlength="2"
 value="{esc(s['default_region'])}"><div class="hint">Two letters, e.g. US, CA, GB, AU.</div>
 <p><button>Save</button></p></form>
-<h2>Change password</h2><form method="post" action="/password">
-<label>Current password</label><input type="password" name="current" autocomplete="current-password">
-<label>New password</label><input type="password" name="password" autocomplete="new-password">
-<label>Again</label><input type="password" name="password2" autocomplete="new-password">
-<p><button>Change password</button></p></form>
+<h2>Passkeys</h2><div class="card"><table><tr><th>Name</th><th>Added</th><th>Last used</th><th></th></tr>
+{rows}</table></div>
+<div id="msg" class="banner" hidden></div>
+<div class="bar" style="margin-top:12px"><input type="text" id="pkname" maxlength="60" placeholder="Name, e.g. iPhone">
+<button id="addpk">Add a passkey</button></div>
+<div class="hint">Add one for each device (or a phone you can use from any computer). The last passkey can't be removed.</div>
+<form method="post" action="/logout-everywhere" style="margin-top:10px"><button class="ghost" style="padding:0">Sign out on
+every device</button></form>
+{PASSKEY_JS}<script>document.getElementById('pkname').value=guessName();
+document.getElementById('addpk').onclick=async()=>{{if(!supported())return;say('Follow your device\\'s prompt…');
+try{{await addPasskey('',document.getElementById('pkname').value);location.href='/settings?saved=1'}}
+catch(e){{say(nice(e),true)}}}};</script>
 <h2>Sign-out</h2><p class="small">Forget the saved sign-in for one account (it stays allowed on the account
 side until you remove the app there).</p>
 <form method="post" action="/signout/microsoft" class="inline"><button class="ghost">Forget Microsoft sign-in</button></form>
-<form method="post" action="/signout/google" class="inline"><button class="ghost">Forget Google sign-in</button></form>"""
+<form method="post" action="/signout/google" class="inline"><button class="ghost">Forget Google sign-in</button></form>
+{f'<h2>HTTPS certificate</h2><p class="small">This site uses its own private certificate authority. '
+ f'<a href="/cert">Install it on another device</a>. CA SHA-256 fingerprint:</p>'
+ f'<p class="small break"><code>{esc(cert)}</code></p>' if cert else ''}"""
     return page("Settings", "/settings", body)

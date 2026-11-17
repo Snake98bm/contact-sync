@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import ssl
 import threading
 import time
 import urllib.parse
@@ -16,6 +17,8 @@ import google
 import icon
 import msgraph
 import store
+import tls
+import webauthn
 import web
 from jobs import Runner
 from version import VERSION
@@ -24,6 +27,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 log = logging.getLogger("main")
 
 PORT = int(os.environ.get("PORT", "80"))
+HTTPS_PORT = int(os.environ.get("HTTPS_PORT", "443"))
+TLS_ON = os.environ.get("TLS", "1").strip() not in ("0", "false", "no", "off")
+# port the browser uses for HTTPS (differs from HTTPS_PORT when Docker maps it, e.g. 8443:443)
+PUBLIC_HTTPS_PORT = int(os.environ.get("PUBLIC_HTTPS_PORT", str(HTTPS_PORT)))
 runner = Runner()
 device = msgraph.DeviceLogin()
 _google_url = {"url": ""}
@@ -42,10 +49,14 @@ def next_backup_text():
 
 def scheduler():
     last = None
+    cert_day = None
     while True:
         try:
             s = store.load_settings()
             now = dt.datetime.now()
+            if TLS_ON and cert_day != now.date():
+                cert_day = now.date()
+                tls.refresh()               # renews the site certificate when < 60 days are left
             key = now.strftime("%Y-%m-%d ") + s["backup_time"]
             if s["backup_enabled"] and now.strftime("%H:%M") == s["backup_time"] and last != key:
                 last = key
@@ -65,11 +76,58 @@ def status_json():
             "report_created": r.get("created") if r else None, "next_backup": next_backup_text()}
 
 
+class Server(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        """Failed TLS handshakes, scanners and dropped connections are normal: one log line, no trace."""
+        import sys
+        err = sys.exc_info()[1]
+        if isinstance(err, (ssl.SSLError, ConnectionError, TimeoutError, OSError)):
+            log.debug("connection from %s dropped: %s", client_address[0], err)
+            return
+        super().handle_error(request, client_address)
+
+
+def _site():
+    """(rp_id, allowed origins) for passkeys: the one canonical HTTPS address."""
+    host = tls.canonical_host()
+    port = "" if PUBLIC_HTTPS_PORT == 443 else f":{PUBLIC_HTTPS_PORT}"
+    return host, {f"https://{host}{port}"}
+
+
+# reachable without signing in
+OPEN_PATHS = {"/login", "/setup", "/cert", "/ca.crt", "/auth/login/options", "/auth/login",
+              "/auth/register/options", "/auth/register"}
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "contact-sync/" + VERSION
+    timeout = 60            # a stalled client (or TLS handshake) can't hold a thread forever
 
     def log_message(self, fmt, *args):
         pass
+
+    @property
+    def secure(self):
+        return isinstance(self.connection, ssl.SSLSocket)
+
+    def _canonical(self):
+        """With HTTPS on, everything is used at https://<canonical host> (passkeys are tied to
+        one name). Plain HTTP still answers /healthz (health check) and the certificate download
+        (needed before a device trusts HTTPS). Returns True if it redirected."""
+        if not TLS_ON:
+            return False
+        path = urllib.parse.urlparse(self.path).path
+        if path == "/healthz" or (not self.secure and path in ("/cert", "/ca.crt")):
+            return False
+        host = (self.headers.get("Host") or "").lower()
+        want_host, origins = _site()
+        want = next(iter(origins))
+        if self.secure and (host == want_host and PUBLIC_HTTPS_PORT == 443 or want.endswith("//" + host)):
+            return False
+        self._send(308, "", headers={"Location": want + self.path})
+        return True
 
     def _send(self, code, body, ctype="text/html; charset=utf-8", headers=None):
         data = body.encode() if isinstance(body, str) else body
@@ -79,13 +137,14 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Content-Type-Options", "nosniff")
         for k, v in (headers or {}).items():
             self.send_header(k, v)
         self.end_headers()
         self.wfile.write(data)
 
-    def _json(self, obj, code=200):
-        self._send(code, json.dumps(obj, default=str), "application/json")
+    def _json(self, obj, code=200, headers=None):
+        self._send(code, json.dumps(obj, default=str), "application/json", headers)
 
     def _redirect(self, to, cookie=None):
         self._send(303, "", headers={"Location": to, **({"Set-Cookie": cookie} if cookie else {})})
@@ -93,22 +152,19 @@ class Handler(BaseHTTPRequestHandler):
     def _ip(self):
         return self.client_address[0]
 
+    def _signed_in(self):
+        return auth.logged_in(self.headers.get("Cookie"))
+
     def _gate(self, path):
         """True if the request was answered here. /api/ also accepts the API key."""
         if path.startswith("/api/") and auth.api_key_ok(self.headers.get("Authorization")):
             return False
-        if not auth.is_set():
-            if path == "/setup":
-                return False
-            if path.startswith("/api/"):
-                self._json({"error": "password not set"}, 401)
-            else:
-                self._redirect("/setup")
-            return True
-        if path == "/login" or auth.logged_in(self.headers.get("Cookie")):
+        if path in OPEN_PATHS or self._signed_in():
             return False
         if path.startswith("/api/"):
-            self._json({"error": "log in or send the API key"}, 401)
+            self._json({"error": "sign in or send the API key"}, 401)
+        elif not auth.is_set():
+            self._redirect("/setup")
         else:
             self._redirect("/login?next=" + urllib.parse.quote(path if self.command == "GET" else "/"))
         return True
@@ -118,6 +174,8 @@ class Handler(BaseHTTPRequestHandler):
         return nxt if nxt.startswith("/") and not nxt.startswith("//") and "\\" not in nxt else "/"
 
     def do_GET(self):
+        if self._canonical():
+            return
         url = urllib.parse.urlparse(self.path)
         path, qs = url.path, urllib.parse.parse_qs(url.query)
         if path == "/healthz":
@@ -127,10 +185,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, found[0], found[1], {"Cache-Control": "public, max-age=86400"})
         if self._gate(path):
             return
+        if path == "/ca.crt":
+            return self._send(200, tls.ca_pem(), "application/x-x509-ca-cert",
+                              {"Content-Disposition": 'attachment; filename="contact-sync-ca.crt"'})
+        if path == "/cert":
+            return self._send(200, web.cert_page(tls.fingerprint(), tls.canonical_host(), next(iter(_site()[1]))))
         if path == "/setup":
-            return self._redirect("/") if auth.is_set() else self._send(200, web.login_page(setup=True))
+            return self._redirect("/") if auth.is_set() else self._send(200, web.setup_page(next(iter(_site()[1]))))
         if path == "/login":
-            return self._send(200, web.login_page(False, nxt=self._safe_next(qs.get("next", ["/"])[0])))
+            if not auth.is_set():
+                return self._redirect("/setup")
+            return self._send(200, web.login_page(self._safe_next(qs.get("next", ["/"])[0])))
         if path == "/":
             last = (store.q("SELECT * FROM runs ORDER BY id DESC LIMIT 1") or [None])[0]
             return self._send(200, web.dashboard(msgraph.status(), google.status(), runner.progress,
@@ -149,7 +214,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, data, "application/octet-stream",
                               {"Content-Disposition": f'attachment; filename="{m.group(1)}_{m.group(2)}"'})
         if path == "/settings":
-            return self._send(200, web.settings_page(store.load_settings(), saved="saved" in qs))
+            return self._send(200, web.settings_page(store.load_settings(), auth.credentials(),
+                                                     saved="saved" in qs, error=qs.get("error", [""])[0],
+                                                     cert=tls.fingerprint()))
         if path == "/signin/microsoft":
             if not msgraph.configured():
                 return self._redirect("/")
@@ -167,6 +234,8 @@ class Handler(BaseHTTPRequestHandler):
         # ----- API (cookie or API key) -----
         if path == "/api/status":
             return self._json(status_json())
+        if path == "/api/setup-code":
+            return self._json({"code": auth.setup_code(), "passkeys": len(auth.credentials())})
         if path == "/api/signin/microsoft":
             return self._json({"status": device.state.get("status", "")})
         if path == "/api/report":
@@ -175,43 +244,71 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(backup.listing())
         self._send(404, "Not found", "text/plain")
 
+    def _passkey_post(self, path, body):
+        """JSON endpoints for passkey sign-in and registration."""
+        rp_id, origins = _site()
+        ip = self._ip()
+        if path in ("/auth/login/options", "/auth/login", "/auth/register/options") and auth.too_many_failures(ip):
+            return self._json({"error": "Too many tries. Wait 5 minutes."}, 429)
+        try:
+            if path == "/auth/login/options":
+                if not auth.is_set():
+                    return self._json({"error": "No passkey yet. Set one up first."}, 400)
+                return self._json(auth.login_options(rp_id))
+            if path == "/auth/login":
+                name = auth.finish_login(body, origins, rp_id)
+                log.info("signed in with passkey '%s' from %s", name, ip)
+                return self._json({"ok": True, "next": self._safe_next(body.get("next") or "/")},
+                                  headers={"Set-Cookie": auth.make_cookie(self.secure)})
+            if path == "/auth/register/options":
+                if auth.is_set():
+                    if not self._signed_in():
+                        return self._json({"error": "Sign in first."}, 401)
+                elif not auth.check_setup_code(body.get("code")):
+                    auth.note_failure(ip)
+                    log.warning("wrong setup code from %s", ip)
+                    return self._json({"error": "That setup code is wrong."}, 403)
+                return self._json(auth.register_options(rp_id, f"Contact Sync ({rp_id})"))
+            if path == "/auth/register":
+                first = not auth.is_set()
+                if not first and not self._signed_in():
+                    return self._json({"error": "Sign in first."}, 401)
+                # the challenge was only handed out after the setup code / sign-in check above
+                auth.finish_register(body, origins, rp_id, body.get("name"))
+                log.info("passkey '%s' added from %s", body.get("name"), ip)
+                return self._json({"ok": True}, headers={"Set-Cookie": auth.make_cookie(self.secure)} if first else None)
+        except webauthn.Invalid as e:
+            auth.note_failure(ip)
+            log.warning("passkey check failed from %s: %s", ip, e)
+            return self._json({"error": str(e)}, 400)
+        return self._json({"error": "not found"}, 404)
+
     def do_POST(self):
+        if self._canonical():
+            return
         path = urllib.parse.urlparse(self.path).path
         n = int(self.headers.get("Content-Length") or 0)
-        form = urllib.parse.parse_qs(self.rfile.read(min(n, 65536)).decode(), keep_blank_values=True) if n else {}
+        raw = self.rfile.read(min(n, 65536)) if n else b""
         if self._gate(path):
             return
+        if path.startswith("/auth/"):
+            try:
+                body = json.loads(raw or b"{}")
+                if not isinstance(body, dict):
+                    raise ValueError
+            except ValueError:
+                return self._json({"error": "bad request"}, 400)
+            return self._passkey_post(path, body)
+        form = urllib.parse.parse_qs(raw.decode(), keep_blank_values=True)
         f = lambda k: form.get(k, [""])[0]
-        if path == "/setup":
-            if auth.is_set():
-                return self._redirect("/")
-            pw = f("password")
-            if len(pw) < auth.MIN_LEN:
-                return self._send(400, web.login_page(True, f"Use at least {auth.MIN_LEN} characters."))
-            if pw != f("password2"):
-                return self._send(400, web.login_page(True, "The two passwords don't match."))
-            auth.set_password(pw)
-            log.info("website password set from %s", self._ip())
-            return self._redirect("/", auth.make_cookie())
-        if path == "/login":
-            nxt = self._safe_next(f("next") or "/")
-            if auth.too_many_failures(self._ip()):
-                return self._send(429, web.login_page(False, "Too many tries. Wait 5 minutes.", nxt))
-            if not auth.check_password(f("password")):
-                auth.note_failure(self._ip())
-                log.warning("failed login from %s", self._ip())
-                return self._send(401, web.login_page(False, "Wrong password.", nxt))
-            return self._redirect(nxt, auth.make_cookie())
         if path == "/logout":
-            return self._redirect("/login", auth.clear_cookie())
-        if path == "/password":
-            if not auth.check_password(f("current")):
-                return self._send(400, web.settings_page(store.load_settings(), error="Current password is wrong."))
-            if len(f("password")) < auth.MIN_LEN or f("password") != f("password2"):
-                return self._send(400, web.settings_page(
-                    store.load_settings(), error=f"New password must be at least {auth.MIN_LEN} characters and match."))
-            auth.set_password(f("password"))
-            return self._redirect("/settings?saved=1", auth.make_cookie())
+            return self._redirect("/login", auth.clear_cookie(self.secure))
+        if path == "/logout-everywhere":
+            auth.logout_everywhere()
+            return self._redirect("/login", auth.clear_cookie(self.secure))
+        if path == "/passkeys/remove":
+            err = auth.remove_credential(f("id"))
+            return self._redirect("/settings?" + (urllib.parse.urlencode({"error": err}) if err else "saved=1"))
         if path == "/settings":
             s = store.load_settings()
             try:
@@ -227,7 +324,7 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("Country must be two letters, like US")
                 new.update(backup_time=t, keep_days=keep, default_region=region)
             except ValueError as e:
-                return self._send(400, web.settings_page(s, error=str(e)))
+                return self._send(400, web.settings_page(s, auth.credentials(), error=str(e), cert=tls.fingerprint()))
             store.save_settings(new)
             return self._redirect("/settings?saved=1")
         if path in ("/run", "/api/run"):
@@ -259,11 +356,22 @@ def main():
     if not os.path.exists(store.SETTINGS_PATH):
         store.save_settings(store.load_settings())
     runner.load_latest()
-    threading.Thread(target=scheduler, daemon=True).start()
-    log.info("contact-sync %s on :%d (read-only). Microsoft %s, Google %s, API key %s", VERSION, PORT,
+    log.info("contact-sync %s (read-only): HTTP :%d%s. Microsoft %s, Google %s, API key %s", VERSION, PORT,
+             f", HTTPS :{HTTPS_PORT}" if TLS_ON else "",
              "configured" if msgraph.configured() else "NOT CONFIGURED",
              "configured" if google.configured() else "NOT CONFIGURED", "on" if auth.API_KEY else "off")
-    ThreadingHTTPServer(("", PORT), Handler).serve_forever()
+    if TLS_ON:
+        tls.ensure()
+        log.info("site: https://%s  CA SHA-256 %s", tls.canonical_host(), tls.fingerprint())
+        https = Server(("", HTTPS_PORT), Handler)
+        # handshake happens in the request thread, so a slow client can't block new connections
+        https.socket = tls.context().wrap_socket(https.socket, server_side=True, do_handshake_on_connect=False)
+        threading.Thread(target=https.serve_forever, daemon=True).start()
+    else:
+        log.warning("TLS=0: passkeys need HTTPS, so sign-in only works on http://localhost")
+    auth.setup_code()               # logs the one-time code while no passkey exists
+    threading.Thread(target=scheduler, daemon=True).start()
+    Server(("", PORT), Handler).serve_forever()
 
 
 if __name__ == "__main__":
