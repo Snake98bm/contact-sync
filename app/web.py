@@ -35,7 +35,7 @@ tr:last-child td{border-bottom:0}td.num{font-variant-numeric:tabular-nums;white-
 .pill{display:inline-block;padding:1px 9px;border-radius:99px;font-size:12.5px;font-weight:600;white-space:nowrap}
 .p-ok{color:var(--ok);background:var(--okbg)}.p-warn{color:var(--warn);background:var(--warnbg)}
 .p-bad{color:var(--bad);background:var(--badbg)}.p-info{color:var(--info);background:var(--infobg)}
-.p-mute{color:var(--mute);background:var(--mutebg)}tr.review>td{background:var(--warnbg)}.muted{color:var(--muted)}.small{font-size:13px}
+.p-mute{color:var(--mute);background:var(--mutebg)}tr.review>td{background:var(--warnbg)}tr.review:has(input:checked)>td{background:none}tr.review:has(input:checked) .p-warn{color:var(--ok);background:var(--okbg)}tr.review:has(input:checked) .rv:after{content:"ed"}.muted{color:var(--muted)}.small{font-size:13px}
 button,.btn{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:8px 14px;font:inherit;
 font-weight:600;cursor:pointer;text-decoration:none;display:inline-block}
 @media (prefers-color-scheme:dark){button,.btn{color:#0f1218}}
@@ -1077,6 +1077,9 @@ f.addEventListener('change',save);f.addEventListener('input',save);
 })()</script>"""
 
 
+REVIEW_PILL = ' <span class="pill p-warn rv">Review</span>'    # reads "Reviewed" once ticked (CSS)
+
+
 def _address_rows(items):
     """Each address: before, and editable boxes holding the proposed fix."""
     rows = []
@@ -1093,8 +1096,8 @@ def _address_rows(items):
         rows.append(
             f"<tr{' class=review' if review else ''}><td><input type='checkbox' name='item' value='{n}' id='a{n}' "
             f"class='k-address'{' checked' if i['default'] else ''}></td><td>{esc(i['title'])} {who}"
-            f"{' ' + pill('Review', 'warn') if review else ''}"
-            f"<div class='muted small'>{esc((i.get('addr_type') or '').title())} · now: {esc(before) or '(empty)'}</div>"
+            f"{REVIEW_PILL if review else ''}"
+            f"<div class='muted small'>{esc((i.get('addr_type') or '').title())} · was: {esc(before) or '(empty)'}</div>"
             f"<textarea name='addr_{n}_street' rows='{max(1, (a.get('street') or '').count(chr(10)) + 1)}' "
             f"style='width:100%;max-width:420px;margin-top:4px' onchange=\"document.getElementById('a{n}').checked=true\">"
             f"{esc(a.get('street', ''))}</textarea><div class='bar'>{box('city', 'City', 140)}{box('region', 'State', 60)}"
