@@ -76,6 +76,16 @@ def updated_of(side, raw):
     return raw.get("lastModifiedDateTime", "") if side == "microsoft" else common(side, raw)["updated"]
 
 
+def _when(stamp):
+    """'2026-11-17T16:52:36Z' / '2026-11-17T16:52:36.613131Z' -> datetime, for comparing the two sides
+    (compared as text, '.613Z' would sort before 'Z')."""
+    import datetime as dt
+    try:
+        return dt.datetime.fromisoformat((stamp or "").replace("Z", "+00:00"))
+    except ValueError:
+        return dt.datetime.min.replace(tzinfo=dt.timezone.utc)
+
+
 def _norm(field, v):
     """For deciding whether two sides changed a field to the same thing."""
     if field == "emails":
@@ -188,8 +198,12 @@ def start():
 
 def run(trigger="schedule", allow_deletes=False):
     """One sync pass. Returns the run row id."""
+    if writer.busy.get("cleanup"):
+        log.info("sync run skipped: the cleanup is running")
+        return None
     if not _lock.acquire(blocking=False):
         return None
+    writer.busy["sync"] = True
     state.update(running=True, step="Reading both accounts")
     rid = store.x("INSERT INTO sync_runs(started, trigger) VALUES(?,?)", (time.time(), trigger))
     c = {"created": 0, "updated": 0, "deleted": 0, "linked_new": 0, "conflicts": 0, "skipped": 0}
@@ -208,6 +222,12 @@ def run(trigger="schedule", allow_deletes=False):
                 raise RuntimeError(f"{LABEL[side]} returned only {len(data[side])} contacts for {have} linked: "
                                    "stopped, nothing changed.")
         state["step"] = "Comparing"
+
+        # 0) a link that lost one side (older versions could leave these) is no pair any more
+        for lk in [x for x in all_links if not (x["ms_id"] and x["g_id"])]:
+            store.x("DELETE FROM links WHERE id=?", (lk["id"],))
+            lines.append(f"Removed a broken link for “{lk['name']}” (only one side was left)")
+        all_links = [x for x in all_links if x["ms_id"] and x["g_id"]]
 
         # 1) links where a side is missing from the list
         gone = []
@@ -247,6 +267,10 @@ def run(trigger="schedule", allow_deletes=False):
             except writer.Refused as e:
                 c["skipped"] += 1
                 lines.append(f"Skipped deleting “{lk['name']}”: {e}")
+            except Exception as e:                  # one contact's trouble never stops the run
+                log.exception("sync delete failed")
+                c["skipped"] += 1
+                lines.append(f"Failed deleting “{lk['name']}”: {e}"[:300])
 
         # 2) links present on both sides
         state["step"] = "Copying changes"
@@ -254,7 +278,12 @@ def run(trigger="schedule", allow_deletes=False):
             a, b = data["microsoft"].get(lk["ms_id"]), data["google"].get(lk["g_id"])
             if a is None or b is None:
                 continue
-            _merge(lk, a, b, test, c, lines)
+            try:
+                _merge(lk, a, b, test, c, lines)
+            except Exception as e:
+                log.exception("sync of one contact failed")
+                c["skipped"] += 1
+                lines.append(f"Failed syncing “{lk['name']}”: {e}"[:300])
 
         # 3) contacts that appeared since the last run
         state["step"] = "Adding new contacts"
@@ -269,6 +298,7 @@ def run(trigger="schedule", allow_deletes=False):
                  c["deleted"], c["linked_new"], c["conflicts"], c["skipped"], blocked, json.dumps(lines[:300]), rid))
         store.x("DELETE FROM sync_runs WHERE started < ?", (time.time() - 30 * 86400,))
         state.update(running=False, step="")
+        writer.busy["sync"] = False
         _lock.release()
     return rid
 
@@ -288,7 +318,7 @@ def _merge(lk, a, b, test, c, lines):
     if test and not (is_test(name) and is_test(common("google", b)["name"])):
         c["skipped"] += 1
         return
-    newer_ms = updated_of("microsoft", a) >= updated_of("google", b)
+    newer_ms = _when(updated_of("microsoft", a)) >= _when(updated_of("google", b))
     to_a, to_b = dict(ra), dict(rb)
     for f in sorted(ca | cb):
         if f in ca and f not in cb:
@@ -349,6 +379,8 @@ def _new_contacts(data, names, test, c, lines):
                 else:
                     ids, _ = writer.create(model.editable(new), sides=(other,), action="sync",
                                            note=f"sync: new in {LABEL[side]}")
+                    # handled from this moment: if anything below fails, the next run must not copy it again
+                    store.x("INSERT OR IGNORE INTO seen(side, id, ts) VALUES(?,?,?)", (side, cid, time.time()))
                     made, _ = writer._fresh({"side": other, "id": ids[other]})
                     pair = {side: raw, other: made}
                     _new_link(pair["microsoft"], pair["google"])
@@ -358,6 +390,11 @@ def _new_contacts(data, names, test, c, lines):
             except writer.Refused as e:
                 c["skipped"] += 1
                 lines.append(f"Skipped new “{new['name']}”: {e}")
+                continue
+            except Exception as e:
+                log.exception("copying a new contact failed")
+                c["skipped"] += 1
+                lines.append(f"Failed copying new “{new['name']}”: {e}"[:300])
                 continue
             store.x("INSERT OR IGNORE INTO seen(side, id, ts) VALUES(?,?,?)", (side, cid, time.time()))
 
@@ -370,11 +407,8 @@ def after_write(removed=(), upserted=()):
     link; a contact restored to both sides at once is linked."""
     if not store.q("SELECT 1 FROM sqlite_master WHERE name='links'"):
         return
-    for side, cid in removed:
-        col = COL[side][0]
-        store.x(f"DELETE FROM links WHERE {col}=? AND {COL[OTHER[side]][0]} IS NULL", (cid,))
-        store.x(f"UPDATE links SET {col}=NULL WHERE {col}=?", (cid,))
-        store.x("DELETE FROM links WHERE ms_id IS NULL AND g_id IS NULL")
+    for side, cid in removed:                        # a deleted copy ends its link (no half links)
+        store.x(f"DELETE FROM links WHERE {COL[side][0]}=?", (cid,))
     for side, raw in upserted:
         rows = store.q(f"SELECT id FROM links WHERE {COL[side][0]}=?", (_id(side, raw),))
         for r in rows:

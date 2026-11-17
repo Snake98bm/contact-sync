@@ -250,6 +250,40 @@ def test_sync():
     assert run()["deleted"] == 0
 
 
+def test_robustness():
+    set(write_mode="on")
+    # a broken half link (one side gone) is cleaned up, not a crash
+    store.x("INSERT INTO links(ms_id, g_id, name) VALUES(?,?,?)", ("AAM-ghost", None, "Ghost Example"))
+    r = run()
+    assert not store.q("SELECT 1 FROM links WHERE ms_id='AAM-ghost'") and "broken link" in r["log"]
+    # one contact Google rejects doesn't stop the others
+    x = person("Contact-Sync Bad", "bad@example.com", "(555) 555-0601")
+    y = person("Contact-Sync Good", "good@example.com", "(555) 555-0602")
+    run()
+    edit_ms(x[0], personalNotes="will fail")
+    edit_ms(y[0], personalNotes="goes through")
+    real = google.update_person
+
+    def picky(rn, body, fields):
+        if rn == x[1]:
+            raise net.HttpError(400, '{"error":"bad field"}', rn)
+        return real(rn, body, fields)
+    google.update_person = picky
+    try:
+        r = run()
+    finally:
+        google.update_person = real
+    assert notes_g(y[1]) == "goes through" and "failed on Google" in r["log"] and r["error"] is None, r["log"]
+    # a cleanup that is running makes sync runs skip
+    writer.busy["cleanup"] = True
+    try:
+        assert sync.run("test") is None
+    finally:
+        writer.busy["cleanup"] = False
+    # newest edit: real time compare (fractional seconds)
+    assert sync._when("2026-01-01T00:00:00.5Z") > sync._when("2026-01-01T00:00:00Z")
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

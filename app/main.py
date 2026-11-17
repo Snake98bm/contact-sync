@@ -71,7 +71,7 @@ def scheduler():
                 last = key
                 if msgraph.status()["state"] == "ok" or google.status()["state"] == "ok":
                     runner.start("nightly")
-            if s.get("sync_enabled") and not runner.progress["running"]:
+            if s.get("sync_enabled") and not runner.progress["running"] and not writer.busy.get("cleanup"):
                 last_sync = (store.q("SELECT started FROM sync_runs ORDER BY id DESC LIMIT 1") or [{"started": 0}])[0]
                 if time.time() - (last_sync["started"] or 0) >= int(s.get("sync_minutes", 60)) * 60 \
                         and msgraph.status()["state"] == "ok" and google.status()["state"] == "ok":
@@ -419,8 +419,9 @@ class Handler(BaseHTTPRequestHandler):
             back = lambda k, v: self._redirect("/cleanup?" + urllib.parse.urlencode({k: v}))
             try:
                 if path == "/cleanup/plan":
-                    plan = cleanup.build_plan()
-                    return back("msg", f"Plan ready: {len(plan['items'])} items.")
+                    if not cleanup.start_plan():
+                        return back("error", "A plan is already being built, or the cleanup is running.")
+                    return self._redirect("/cleanup")
                 plan_id = int(f("plan_id"))
                 selected = cleanup.choices_from_form(plan_id, f, form_all)
                 if not selected:

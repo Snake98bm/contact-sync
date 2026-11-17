@@ -1136,6 +1136,12 @@ def cleanup_page(plan, st, write_mode, msg="", error=""):
         b.append(f'<div class="banner">{esc(msg)}</div>')
     if error:
         b.append(f'<div class="banner err">{esc(error)}</div>')
+    if st.get("build_error"):
+        b.append(f'<div class="banner err">Building the plan failed: {esc(st["build_error"])}</div>')
+    if st.get("building"):
+        b.append(f'<div class="banner" id="prog">Building the plan: {esc(st.get("build_step") or "starting")}… '
+                 'This page refreshes by itself.</div><script>setTimeout(()=>location.reload(),3000)</script>')
+        return page("Cleanup", "/cleanup", "".join(b))
     if st["running"]:
         pct = int(100 * st["done"] / max(st["total"], 1))
         b.append(f'<div class="banner" id="prog">Working: {st["done"]} of {st["total"]} ({pct}%) — {esc(st["step"])}</div>'

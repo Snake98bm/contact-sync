@@ -233,8 +233,9 @@ def to_people(rec, base=None):
             nm[k2] = rec[k1]
         else:
             nm.pop(k2, None)
-    full = _clean(f"{rec.get('given') or ''} {rec.get('middle') or ''} {rec.get('family') or ''}")
-    if full:
+    full = _clean(" ".join(x or "" for x in (nm.get("honorificPrefix"), rec.get("given"), rec.get("middle"),
+                                               rec.get("family"), nm.get("honorificSuffix"))))
+    if full and (rec.get("given") or rec.get("middle") or rec.get("family")):
         # Google keeps the old combined name (and shows it) unless a new one is sent with the parts
         nm["unstructuredName"] = full
     old_emails ={(e.get("value") or "").strip().lower(): _strip(e) for e in base.get("emailAddresses") or []}
@@ -254,14 +255,23 @@ def to_people(rec, base=None):
         phones.append(item)
     org = _strip((base.get("organizations") or [{}])[0])
     org.update(name=rec.get("company") or "", title=rec.get("title") or "")
-    old_addr = {}
-    for a in base.get("addresses") or []:
-        old_addr.setdefault((a.get("type") or "other").lower(), _strip(a))
+    # Google allows its own address labels ("Cabin"); the record only knows home/work/other. Match each
+    # address to the stored one (same kind, same street first) and keep that one's own label.
+    norm_t = lambda t: t if (t or "").lower() in GRAPH_ADDR else "other"
+    first = lambda s: " ".join((s or "").split("\n")[0].lower().split())
+    old_addr = [_strip(a) for a in base.get("addresses") or []]
+    used = set()
     addresses = []
     for a in rec.get("addr") or []:
-        item = dict(old_addr.get(a.get("type") or "other", {}))
+        t = a.get("type") or "other"
+        cands = [i for i, o in enumerate(old_addr) if i not in used and norm_t((o.get("type") or "other").lower()) == t]
+        pick = next((i for i in cands if first(old_addr[i].get("streetAddress")) == first(a.get("street"))),
+                    cands[0] if cands else None)
+        item = dict(old_addr[pick]) if pick is not None else {}
+        if pick is not None:
+            used.add(pick)
         item.pop("formattedValue", None)          # Google rebuilds it from the parts
-        item.update({"type": a.get("type") or "other", "streetAddress": a.get("street", ""), "city": a.get("city", ""),
+        item.update({"type": item.get("type") or t, "streetAddress": a.get("street", ""), "city": a.get("city", ""),
                      "region": a.get("region", ""), "postalCode": a.get("postal", ""), "country": a.get("country", "")})
         addresses.append(item)
     body = {

@@ -40,6 +40,9 @@ CREATE TABLE IF NOT EXISTS bin(
 
 _lock = threading.Lock()
 _scope = threading.local()
+# Long jobs that must not overlap: the cleanup sets busy["cleanup"], the sync sets busy["sync"].
+# Each checks the other before it starts.
+busy = {"cleanup": False, "sync": False}
 listener = None          # set by main: called as listener(removed=[(side, id)], upserted=[(side, raw)])
 
 

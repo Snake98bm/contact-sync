@@ -40,7 +40,8 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS cleanup_plans(id INTEGER PRIMARY KEY, created REAL, plan TEXT, applied REAL, result TEXT);
 """
 
-state = {"running": False, "step": "", "done": 0, "total": 0, "log": [], "plan_id": None}
+state = {"running": False, "step": "", "done": 0, "total": 0, "log": [], "plan_id": None,
+         "building": False, "build_step": "", "build_error": ""}
 _lock = threading.Lock()
 
 
@@ -170,7 +171,9 @@ def apply_name(rec, choice):
 
 # ---------- plan ----------
 
-def build_plan():
+def build_plan(progress=None):
+    say = progress or (lambda text: None)
+    say("Reading both accounts")
     data, _, names = sync._fetch()
     region = store.load_settings().get("default_region", "US")
     contacts = [sync.common(s, raw, names) for s in sync.SIDES for raw in data[s].values()]
@@ -251,7 +254,10 @@ def build_plan():
 
     # addresses: one item per person per address (both copies, when they hold the same address)
     lookup = bool(store.load_settings().get("address_lookup", True))
-    for p in rep["people"]:
+    n_people = len(rep["people"])
+    for n_done, p in enumerate(rep["people"], 1):
+        if n_done % 10 == 1:
+            say(f"Checking addresses ({n_done} of {n_people} people)")
         seen_addr = {}
         for c in p["members"]:
             for a in c.get("addr") or []:
@@ -278,9 +284,13 @@ def build_plan():
         add("label", "Imported on 9/6", f"Delete this Google label ({n} contacts keep everything else)", [], True,
             group=groups["Imported on 9/6"])
     if "Cal-Com" in groups:
-        n = sum(1 for c in contacts if c["side"] == "google" and "Cal-Com" in c["groups"])
-        add("category", "Cal-Com", f"Give the Outlook copies of the {n} Google “Cal-Com” contacts the Outlook "
-            "category “Cal-Com”", [], True, group=groups["Cal-Com"], category="Cal-Com")
+        # only the linked Outlook copies that don't have the category yet
+        ms_of = {g: m for m, g in sync.link_pairs()}
+        todo = [c for c in contacts if c["side"] == "google" and "Cal-Com" in c["groups"] and ms_of.get(c["id"])
+                and "Cal-Com" not in (data["microsoft"].get(ms_of[c["id"]], {}).get("categories") or [])]
+        if todo:
+            add("category", "Cal-Com", f"Give {len(todo)} Outlook copies of Google “Cal-Com” contacts the Outlook "
+                "category “Cal-Com”", [], True, group=groups["Cal-Com"], category="Cal-Com")
     items = [i for i in items if not i.get("noop")]
     for n, i in enumerate(sorted(items, key=lambda i: (ORDER.index(i["kind"]), (i["title"] or "").lower())), 1):
         i["id"] = n
@@ -358,9 +368,17 @@ def _apply(plan_id, selected, backup_runner):
     selected = _choices(selected)
     region = store.load_settings().get("default_region", "US")
     ok = failed = skipped = 0
+    writer.busy["cleanup"] = True                    # sync runs skip while this is set
     try:
         if writer.mode() != "on":
             raise writer.Refused("Write mode must be “on” (Settings) to clean up real contacts.")
+        waited = 0
+        while writer.busy.get("sync") and waited < 900:   # a sync run already going: let it finish first
+            state["step"] = "Waiting for a sync run to finish"
+            time.sleep(2)
+            waited += 2
+        if writer.busy.get("sync"):
+            raise RuntimeError("A sync run is still going after 15 minutes; nothing was changed. Try again later.")
         row = store.q("SELECT * FROM cleanup_plans WHERE id=?", (plan_id,))[0]
         items = [dict(i, choice=selected[i["id"]]) for i in json.loads(row["plan"])["items"] if i["id"] in selected]
         if backup_runner is not None:
@@ -399,6 +417,7 @@ def _apply(plan_id, selected, backup_runner):
                 (time.time(), json.dumps({"ok": ok, "failed": failed, "skipped": skipped, "log": state["log"][-500:]}),
                  plan_id))
         state.update(running=False, step="")
+        writer.busy["cleanup"] = False
 
 
 def _fresh(m):
@@ -544,3 +563,22 @@ def _do_category(item, region, _names):
         n += 1
         time.sleep(PAUSE / 2)
     return f"category added to {n} Outlook contacts"
+
+
+def start_plan():
+    """Build the plan in the background (address lookups can take a minute or two)."""
+    with _lock:
+        if state["building"] or state["running"]:
+            return False
+        state.update(building=True, build_step="Starting", build_error="")
+
+    def work():
+        try:
+            build_plan(progress=lambda text: state.update(build_step=text))
+        except Exception as e:
+            log.exception("building the cleanup plan failed")
+            state["build_error"] = str(e)[:300]
+        finally:
+            state.update(building=False, build_step="")
+    threading.Thread(target=work, daemon=True).start()
+    return True

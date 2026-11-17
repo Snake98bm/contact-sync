@@ -137,6 +137,20 @@ def make_test_contact():
 
 # ---------- tests ----------
 
+def test_google_keeps_titles_and_address_labels():
+    base = {"names": [{"honorificPrefix": "Dr", "givenName": "Sam", "familyName": "Example", "honorificSuffix": "Jr.",
+                       "unstructuredName": "Example, Sam"}],
+            "addresses": [{"type": "Cabin", "streetAddress": "9 Lake Rd", "city": "Springfield"},
+                          {"type": "home", "streetAddress": "1 Example St", "city": "Springfield"}]}
+    rec = model.editable(model.from_people(dict(base, resourceName="people/c1"), {}))
+    assert [a["type"] for a in rec["addr"]] == ["other", "home"]
+    rec["addr"][0]["postal"] = "90000"
+    body = model.to_people(rec, base)
+    assert body["names"][0]["unstructuredName"] == "Dr Sam Example Jr.", body["names"]
+    assert [(a["type"], a["streetAddress"], a.get("postalCode")) for a in body["addresses"]] == \
+        [("Cabin", "9 Lake Rd", "90000"), ("home", "1 Example St", "")], body["addresses"]
+
+
 def test_round_trip():
     rec = dict(writer.TEST_REC, middle="Q", birthday="1980-02-03", title="Owner",
                phones=[{"value": "(555) 555-0100", "type": "mobile"}, {"value": "(555) 555-0101", "type": "home"},

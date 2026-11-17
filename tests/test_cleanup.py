@@ -269,8 +269,15 @@ def test_cleanup():
     # a sync right after copies nothing back and forth
     r = store.q("SELECT * FROM sync_runs WHERE id=?", (sync.run("test"),))[0]
     assert (r["updated"], r["created"], r["deleted"], r["error"]) == (0, 0, 0, None), dict(r)
+    # a rebuilt plan no longer offers the Cal-Com category (all linked Outlook copies have it), and
+    # the build reports progress
+    steps = []
+    plan2 = cleanup.build_plan(progress=steps.append)
+    assert not [i for i in plan2["items"] if i["kind"] == "category"] and any("addresses" in s for s in steps)
     # the plan shows as applied
-    assert cleanup.latest_plan()["applied"]
+    assert cleanup.latest_plan()["plan_id"] == plan2["plan_id"] and not cleanup.latest_plan()["applied"]
+    assert store.q("SELECT applied FROM cleanup_plans WHERE id=?", (plan["plan_id"],))[0]["applied"]
+    assert not writer.busy["cleanup"]
 
 
 if __name__ == "__main__":
