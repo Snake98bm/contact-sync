@@ -93,7 +93,7 @@ def split_street(a):
     if len(lines) == 1 and lines[0].count(",") >= 2:
         lines = [x.strip() for x in lines[0].split(",") if x.strip()]
     elif len(lines) == 1 and lines[0].count(",") == 1:
-        # '716 Example, Springfield Ca': the part after the comma is 'City ST' (or 'City ST ZIP')
+        # '345 Example, Springfield Ca': the part after the comma is 'City ST' (or 'City ST ZIP')
         head, tail = (x.strip() for x in lines[0].split(","))
         t = _split_tail(tail)
         if head and t and t[0]:
