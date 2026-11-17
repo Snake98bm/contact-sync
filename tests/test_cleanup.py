@@ -74,8 +74,15 @@ def g_get(rn):
 def g_update(rn, body, fields):
     assert body["etag"] == G[rn]["etag"]
     cur = dict(G[rn])
+    old_names = (cur.get("names") or [{}])[0]
     for f in fields.split(","):
         cur[f] = copy.deepcopy(body.get(f, []))
+    if cur.get("names"):          # like Google: the old combined name stays unless a new one is sent
+        n = cur["names"][0]
+        if "unstructuredName" not in n and old_names.get("unstructuredName"):
+            n["unstructuredName"] = old_names["unstructuredName"]
+        n["displayName"] = n.get("unstructuredName") or " ".join(
+            x for x in (n.get("givenName"), n.get("middleName"), n.get("familyName")) if x)
     return g_put(rn, cur)
 
 
@@ -230,7 +237,7 @@ def test_cleanup():
     g = G["people/c-greg"]
     assert g["biographies"][0]["value"] == "Gate code 12", g["biographies"]
     assert [p["value"] for p in g["phoneNumbers"]] == ["(559) 555-1234"], g["phoneNumbers"]
-    assert "unstructuredName" not in g["names"][0]
+    assert g["names"][0]["displayName"] == "Greg Example", g["names"]      # really shown as First Last
     assert MS["AAM-greg"]["personalNotes"] == "Gate code 12" and MS["AAM-greg"]["mobilePhone"] == "(559) 555-1234"
     assert MS["AAM-greg"]["emailAddresses"][0]["address"] == "greg@example.com"
     assert MS["AAM-greg"]["homeAddress"]["postalCode"] == "90000" and g["addresses"][0]["postalCode"] == "90000"

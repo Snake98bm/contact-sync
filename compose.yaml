@@ -8,7 +8,7 @@
 #   the same), and drop the ports: section. The app itself still runs as uid 1000.
 services:
   contact-sync:
-    image: local/contact-sync:0.10.1
+    image: local/contact-sync:0.10.2
     build: .
     container_name: contact-sync
     restart: unless-stopped

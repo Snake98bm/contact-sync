@@ -233,7 +233,11 @@ def to_people(rec, base=None):
             nm[k2] = rec[k1]
         else:
             nm.pop(k2, None)
-    old_emails = {(e.get("value") or "").strip().lower(): _strip(e) for e in base.get("emailAddresses") or []}
+    full = _clean(f"{rec.get('given') or ''} {rec.get('middle') or ''} {rec.get('family') or ''}")
+    if full:
+        # Google keeps the old combined name (and shows it) unless a new one is sent with the parts
+        nm["unstructuredName"] = full
+    old_emails ={(e.get("value") or "").strip().lower(): _strip(e) for e in base.get("emailAddresses") or []}
     old_phones = {}
     for ph in base.get("phoneNumbers") or []:
         old_phones.setdefault(_digits(ph.get("value")), _strip(ph))
