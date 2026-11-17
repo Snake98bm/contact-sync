@@ -130,7 +130,7 @@ def _send(side, cid, rec=None, base=None, raw=None):
                 try:
                     out = google.create_person(body)
                 except net.HttpError as e:
-                    if raw is not None and body.get("memberships") and e.status == 400:
+                    if raw is not None and body.get("memberships") and e.status in (400, 404):   # a label it was in is gone (Google says 404 or 400)
                         # a label it belonged to no longer exists: restore without labels
                         body["memberships"] = []
                         out = google.create_person(body)

@@ -27,6 +27,7 @@ writer.init()
 MS, G = {}, {}
 CALLS = []
 FAIL = {"google_create": 0}
+GONE_LABELS = set()
 
 
 def _stamp():
@@ -64,6 +65,9 @@ def g_create(body):
     if FAIL["google_create"]:
         FAIL["google_create"] -= 1
         raise net.HttpError(503, "backend error", "https://people.googleapis.com/v1/people:createContact")
+    for m in body.get("memberships") or []:      # like Google: a deleted label gives 404
+        if (m.get("contactGroupMembership") or {}).get("contactGroupResourceName") in GONE_LABELS:
+            raise net.HttpError(404, '{"error":{"code":404,"status":"NOT_FOUND"}}', "createContact")
     rn = f"people/c{len(CALLS)}"
     G[rn] = _g_meta(dict(copy.deepcopy(body), resourceName=rn))
     return copy.deepcopy(G[rn])
@@ -310,6 +314,19 @@ def test_page_updates_in_place():
         assert runner.report["backup"] == "b"
     finally:
         writer.listener = None
+
+
+def test_restore_when_its_label_was_deleted():
+    set_mode("test")
+    ids = make_test_contact()                       # in label contactGroups/abc
+    bin_id = writer.delete(members(ids))
+    GONE_LABELS.add("contactGroups/abc")
+    try:
+        new_ids, warns = writer.restore_bin(bin_id)
+    finally:
+        GONE_LABELS.clear()
+    assert new_ids["google"] in G and new_ids["microsoft"] in MS
+    assert G[new_ids["google"]]["memberships"] == [] and any("label" in w for w in warns), warns
 
 
 def test_edit_form_keeps_typed_input():
