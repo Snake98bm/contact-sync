@@ -34,6 +34,7 @@ TLS_ON = os.environ.get("TLS", "1").strip() not in ("0", "false", "no", "off")
 PUBLIC_HTTPS_PORT = int(os.environ.get("PUBLIC_HTTPS_PORT", str(HTTPS_PORT)))
 runner = Runner()
 device = msgraph.DeviceLogin()
+writer.listener = runner.apply_change     # keep the pages current after each change, no re-download
 _google_url = {"url": ""}
 
 
@@ -100,15 +101,6 @@ def _best(p):
     import model
     fresh = [writer._fresh(m)[1] for m in p["members"]]
     return model.editable(max(fresh, key=lambda c: c.get("updated") or ""))
-
-
-def _refresh():
-    """After a change: re-read so the pages show it (Google can take a few seconds to list it)."""
-    try:
-        time.sleep(1.5)
-        runner.refresh()
-    except Exception:
-        log.exception("refresh after a change failed")
 
 
 def _site():
@@ -241,7 +233,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(404, web.page("Not found", "/contacts", "<h1>Not found</h1><p>That contact isn't in "
                                                 "the latest copy. <a href='/contacts'>Back to Contacts</a></p>"))
             if m.group(2):
-                return self._send(200, web.contact_edit_page(p, _best(p), write_mode=writer.mode()))
+                try:
+                    rec = _best(p)
+                except Exception as e:      # deleted or changed elsewhere since the last read, or a network error
+                    log.warning("couldn't read %s for editing: %s", p["name"], e)
+                    return self._redirect(f"/contacts/{m.group(1)}?" + urllib.parse.urlencode(
+                        {"error": "Couldn't read the current copy to edit (it may have been deleted or changed in "
+                                  f"Outlook or Google). Run a backup to refresh. Details: {e}"[:400]}))
+                return self._send(200, web.contact_edit_page(p, rec, write_mode=writer.mode()))
             return self._send(200, web.contact_page(p, runner.report, writer.history([c["id"] for c in p["members"]]),
                                                     msg=qs.get("msg", [""])[0][:500], error=qs.get("error", [""])[0][:500],
                                                     write_mode=writer.mode()))
@@ -353,10 +352,10 @@ class Handler(BaseHTTPRequestHandler):
                 if what == "edit":
                     try:
                         rec = web.parse_edit_form(f)
-                    except ValueError as e:
-                        return self._send(400, web.contact_edit_page(p, _best(p), str(e), writer.mode()))
+                    except ValueError as e:     # show the form again with what was typed, not the old data
+                        return self._send(400, web.contact_edit_page(p, web.parse_edit_form(f, validate=False),
+                                                                     str(e), writer.mode()))
                     warns = writer.update(p["members"], rec)
-                    _refresh()
                     newp = next((x for x in runner.report.get("people", []) if
                                  {c["id"] for c in x["members"]} & {c["id"] for c in p["members"]}), None)
                     dest = f"/contacts/{newp['key']}" if newp else "/contacts"
@@ -364,11 +363,9 @@ class Handler(BaseHTTPRequestHandler):
                     return self._redirect(dest + "?" + urllib.parse.urlencode({"msg": msg}))
                 if what == "delete":
                     bin_id = writer.delete(p["members"])
-                    _refresh()
                     return self._redirect("/bin?" + urllib.parse.urlencode(
                         {"msg": f"Deleted “{p['name']}” from both accounts. It's in the recycle bin (#{bin_id})."}))
                 warns = writer.restore_version(int(m.group(3)), p["members"])
-                _refresh()
                 return back({"msg": "Earlier version restored on both sides." + (" " + " ".join(warns) if warns else "")})
             except writer.Refused as e:
                 return back({"error": str(e)})
@@ -382,7 +379,6 @@ class Handler(BaseHTTPRequestHandler):
             except (writer.Refused, Exception) as e:
                 log.exception("restore failed")
                 return self._redirect("/bin?" + urllib.parse.urlencode({"error": str(e)[:400]}))
-            _refresh()
             return self._redirect("/bin?" + urllib.parse.urlencode(
                 {"msg": "Restored to " + " and ".join("Microsoft 365" if s == "microsoft" else "Google" for s in ids)
                  + "." + (" " + " ".join(warns) if warns else "")}))
@@ -391,7 +387,6 @@ class Handler(BaseHTTPRequestHandler):
                 writer.create(dict(writer.TEST_REC))
             except Exception as e:
                 return self._redirect("/settings?" + urllib.parse.urlencode({"error": str(e)[:400]}))
-            _refresh()
             return self._redirect("/contacts?q=Contact-Sync")
         return None
 
@@ -405,7 +400,6 @@ class Handler(BaseHTTPRequestHandler):
             with writer.test_only():
                 if path == "/api/test-contact":
                     ids, warns = writer.create(dict(writer.TEST_REC))
-                    _refresh()
                     return self._json({"ids": ids, "warnings": warns})
                 m = re.fullmatch(r"/api/contacts/([0-9a-f]{12})/(edit|delete|history/(\d+)/restore)", path)
                 if m:
@@ -420,12 +414,10 @@ class Handler(BaseHTTPRequestHandler):
                         warns = {"bin_id": writer.delete(p["members"])}
                     else:
                         warns = writer.restore_version(int(m.group(3)), p["members"])
-                    _refresh()
                     return self._json({"ok": True, "result": warns})
                 m = re.fullmatch(r"/api/bin/(\d+)/restore", path)
                 if m:
                     ids, warns = writer.restore_bin(int(m.group(1)))
-                    _refresh()
                     return self._json({"ids": ids, "warnings": warns})
         except writer.Refused as e:
             return self._json({"error": str(e)}, 403)

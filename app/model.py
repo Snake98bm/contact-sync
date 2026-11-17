@@ -116,15 +116,74 @@ def display_name(rec):
     return _clean(f"{rec.get('given', '')} {rec.get('middle', '')} {rec.get('family', '')}") or _clean(rec.get("company"))
 
 
-# ---------- back to each side ----------
 
-def to_graph(rec):
-    """Graph contact body (create or full update). Returns (body, warnings): Outlook holds at most
-    3 emails, one mobile, 2 home and 2 business phones, and one address of each kind."""
+
+# ---------- back to each side ----------
+#
+# Edits are merged into the contact's current raw data (`base`), so anything the edit page does not
+# show (email/phone labels, extra address lines, department, nicknames, websites...) is kept.
+# Restores use the saved raw copy itself (graph_writable / people_writable), so nothing is lost.
+
+GRAPH_READ_ONLY = {"id", "changeKey", "createdDateTime", "lastModifiedDateTime", "parentFolderId", "_folder",
+                   "photo", "extensions", "singleValueExtendedProperties", "multiValueExtendedProperties"}
+PEOPLE_WRITABLE = ("addresses", "biographies", "birthdays", "calendarUrls", "clientData", "emailAddresses", "events",
+                   "externalIds", "genders", "imClients", "interests", "locales", "locations", "memberships",
+                   "miscKeywords", "names", "nicknames", "occupations", "organizations", "phoneNumbers", "relations",
+                   "sipAddresses", "urls", "userDefined")
+PEOPLE_OUTPUT_ONLY = {"metadata", "formattedType", "canonicalForm", "displayName", "displayNameLastFirst"}
+GOOGLE_FIELDS = "names,emailAddresses,phoneNumbers,organizations,biographies,birthdays,addresses"
+GOOGLE_ALL_FIELDS = ",".join(PEOPLE_WRITABLE)
+
+
+def graph_writable(raw):
+    """A saved Graph contact as a body for POST/PATCH (read-only properties removed)."""
+    return {k: v for k, v in (raw or {}).items() if k not in GRAPH_READ_ONLY and not k.startswith("@")}
+
+
+def _strip(item, keep_unstructured=True):
+    out = {k: v for k, v in (item or {}).items() if k not in PEOPLE_OUTPUT_ONLY}
+    if not keep_unstructured:
+        out.pop("unstructuredName", None)
+    return out
+
+
+def people_writable(raw):
+    """A saved People API person as a body for createContact/updateContact (output-only fields
+    removed). Group memberships keep only the group reference; the built-in 'myContacts' is implied."""
+    body = {}
+    for f in PEOPLE_WRITABLE:
+        items = [_strip(i) for i in (raw or {}).get(f) or []]
+        if f == "memberships":
+            items = [{"contactGroupMembership": {"contactGroupResourceName":
+                                                 i["contactGroupMembership"]["contactGroupResourceName"]}}
+                     for i in items if (i.get("contactGroupMembership") or {}).get("contactGroupResourceName")
+                     not in (None, "contactGroups/myContacts")]
+        if f == "names":
+            items = items[:1]
+        body[f] = items
+    return body
+
+
+def _bucket(phone_type):
+    """Which Outlook phone slot a Google type lands in: mobile, home, or work (business)."""
+    t = (phone_type or "").lower()
+    return t if t in ("mobile", "home") else "work"
+
+
+def _digits(s):
+    return "".join(ch for ch in s or "" if ch.isdigit())[-10:]
+
+
+def to_graph(rec, base=None):
+    """Graph body for a create (base None) or an update merged onto the current contact.
+    Returns (body, warnings): Outlook holds at most 3 emails, one mobile, 2 home and 2 business
+    phones, and one address of each kind."""
+    base = base or {}
     warn = []
     emails = rec.get("emails") or []
     if len(emails) > 3:
         warn.append(f"Outlook keeps 3 emails; {len(emails) - 3} left out")
+    names = {(e.get("address") or "").lower(): e.get("name") for e in base.get("emailAddresses") or []}
     mobile, home, business = [], [], []
     for p in rec.get("phones") or []:
         t = (p.get("type") or "").lower()
@@ -138,7 +197,7 @@ def to_graph(rec):
         "givenName": rec.get("given") or None, "middleName": rec.get("middle") or None,
         "surname": rec.get("family") or None, "displayName": display_name(rec) or None,
         "companyName": rec.get("company") or None, "jobTitle": rec.get("title") or None,
-        "emailAddresses": [{"address": e, "name": e} for e in emails[:3]],
+        "emailAddresses": [{"address": e, "name": names.get(e.lower()) or e} for e in emails[:3]],
         "mobilePhone": mobile[0] if mobile else None, "homePhones": home[:2], "businessPhones": business[:2],
         "personalNotes": rec.get("notes") or "",
     }
@@ -156,32 +215,66 @@ def to_graph(rec):
     b = rec.get("birthday") or ""
     if len(b) == 10 and b[:4].isdigit():
         body["birthday"] = f"{b}T11:59:00Z"
-    elif b:
+    elif not b:
+        if base:
+            body["birthday"] = None           # cleared on the edit page: clear it in Outlook too
+    else:
         warn.append("Outlook needs a year for a birthday; it was left as it was")
     return body, warn
 
 
-GOOGLE_FIELDS = "names,emailAddresses,phoneNumbers,organizations,biographies,birthdays,addresses"
-
-
-def to_people(rec):
-    """People API person body for createContact / updateContact (GOOGLE_FIELDS)."""
+def to_people(rec, base=None):
+    """People API body (GOOGLE_FIELDS) for a create, or an update merged onto `base` (the
+    current person) so labels, types and sub-fields that the record does not carry are kept."""
+    base = base or {}
+    nm = _strip((base.get("names") or [{}])[0], keep_unstructured=False)   # rebuilt from the parts
+    for k1, k2 in (("given", "givenName"), ("middle", "middleName"), ("family", "familyName")):
+        if rec.get(k1):
+            nm[k2] = rec[k1]
+        else:
+            nm.pop(k2, None)
+    old_emails = {(e.get("value") or "").strip().lower(): _strip(e) for e in base.get("emailAddresses") or []}
+    old_phones = {}
+    for ph in base.get("phoneNumbers") or []:
+        old_phones.setdefault(_digits(ph.get("value")), _strip(ph))
+    phones = []
+    for p in rec.get("phones") or []:
+        item = dict(old_phones.get(_digits(p["value"]), {}))
+        item["value"] = p["value"]
+        old_t, new_t = (item.get("type") or "other").lower(), (p.get("type") or "other").lower()
+        # Keep Google's own label (e.g. "Cottage") when the new type is just Outlook's coarse
+        # kind for the same sort of number (mobile / home / work).
+        coarse_same = new_t in ("mobile", "home", "work") and _bucket(old_t) == new_t
+        if old_t != new_t and not (item.get("type") and coarse_same):
+            item["type"] = new_t
+        phones.append(item)
+    org = _strip((base.get("organizations") or [{}])[0])
+    org.update(name=rec.get("company") or "", title=rec.get("title") or "")
+    old_addr = {}
+    for a in base.get("addresses") or []:
+        old_addr.setdefault((a.get("type") or "other").lower(), _strip(a))
+    addresses = []
+    for a in rec.get("addr") or []:
+        item = dict(old_addr.get(a.get("type") or "other", {}))
+        item.pop("formattedValue", None)          # Google rebuilds it from the parts
+        item.update({"type": a.get("type") or "other", "streetAddress": a.get("street", ""), "city": a.get("city", ""),
+                     "region": a.get("region", ""), "postalCode": a.get("postal", ""), "country": a.get("country", "")})
+        addresses.append(item)
     body = {
-        "names": [{k2: rec.get(k1) for k1, k2 in (("given", "givenName"), ("middle", "middleName"),
-                                                  ("family", "familyName")) if rec.get(k1)}]
-        if any(rec.get(k) for k in ("given", "middle", "family")) else [],
-        "emailAddresses": [{"value": e} for e in rec.get("emails") or []],
-        "phoneNumbers": [{"value": p["value"], "type": (p.get("type") or "other").lower()} for p in rec.get("phones") or []],
-        "organizations": [{"name": rec.get("company") or "", "title": rec.get("title") or ""}]
-        if rec.get("company") or rec.get("title") else [],
+        "names": [nm] if any(nm.get(k) for k in ("givenName", "middleName", "familyName", "honorificPrefix",
+                                                 "honorificSuffix")) else [],
+        "emailAddresses": [dict(old_emails.get(e.lower(), {}), value=e) for e in rec.get("emails") or []],
+        "phoneNumbers": phones,
+        "organizations": [org] if (org.get("name") or org.get("title") or org.get("department")) else [],
         "biographies": [{"value": rec["notes"], "contentType": "TEXT_PLAIN"}] if rec.get("notes") else [],
-        "addresses": [{"type": a.get("type") or "other", "streetAddress": a.get("street", ""), "city": a.get("city", ""),
-                       "region": a.get("region", ""), "postalCode": a.get("postal", ""), "country": a.get("country", "")}
-                      for a in rec.get("addr") or []],
+        "addresses": addresses,
         "birthdays": [],
     }
     b = rec.get("birthday") or ""
-    if len(b) == 10 and b[:4].isdigit():
+    old_b = from_people(dict(base, resourceName="people/x"), {})["birthday"] if base else ""
+    if b and b == old_b:
+        body["birthdays"] = [_strip(x) for x in base.get("birthdays") or []]      # unchanged: keep as stored
+    elif len(b) == 10 and b[:4].isdigit():
         body["birthdays"] = [{"date": {"year": int(b[:4]), "month": int(b[5:7]), "day": int(b[8:10])}}]
     elif len(b) == 7 and b.startswith("--"):
         body["birthdays"] = [{"date": {"month": int(b[2:4]), "day": int(b[5:7])}}]

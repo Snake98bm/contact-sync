@@ -4,13 +4,17 @@
   with "Contact-Sync Test"; "on" = any contact.
 - Before an edit or delete, a fresh copy of each side is read and saved: edits to the contact's
   history (any version can be put back), deletes to the recycle bin (kept 90 days, restorable to
-  both accounts).
+  both accounts). Restores write the saved copy back as it was, field for field.
+- Edits are merged into the current data, so fields the edit page doesn't show are kept.
+- A change that fails half-way (one side done, the other not) is recorded, and a retry of a
+  restore only finishes the missing side.
 - Outlook also keeps deleted contacts in Deleted Items, and Google in Trash for 30 days.
 """
 import json
 import logging
 import threading
 import time
+import uuid
 
 import google
 import model
@@ -22,17 +26,20 @@ log = logging.getLogger("writer")
 TEST_PREFIX = "Contact-Sync Test"
 BIN_DAYS = 90
 MODES = ("off", "test", "on")
+SIDE_NAME = {"microsoft": "Microsoft 365", "google": "Google"}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS versions(
   id INTEGER PRIMARY KEY, ts REAL, side TEXT, cid TEXT, name TEXT, action TEXT,
-  before TEXT, after TEXT, note TEXT);
+  before TEXT, after TEXT, note TEXT, batch TEXT);
 CREATE INDEX IF NOT EXISTS versions_cid ON versions(cid);
 CREATE TABLE IF NOT EXISTS bin(
   id INTEGER PRIMARY KEY, ts REAL, name TEXT, ms_raw TEXT, g_raw TEXT, restored REAL, note TEXT);
 """
 
 _lock = threading.Lock()
+_scope = threading.local()
+listener = None          # set by main: called as listener(removed=[(side, id)], upserted=[(side, raw)])
 
 
 class Refused(Exception):
@@ -42,14 +49,14 @@ class Refused(Exception):
 def init():
     with store.connect() as db:
         db.executescript(SCHEMA)
+        cols = {r[1] for r in db.execute("PRAGMA table_info(versions)")}
+        if "batch" not in cols:                      # tables made by 0.5.0
+            db.execute("ALTER TABLE versions ADD COLUMN batch TEXT")
 
 
 def mode():
     m = store.load_settings().get("write_mode", "test")
     return m if m in MODES else "off"
-
-
-_scope = threading.local()
 
 
 class test_only:
@@ -72,10 +79,19 @@ def _check(*names):
                           f"(not “{bad[0]}”). Switch to “on” in Settings.")
 
 
-def _version(side, cid, name, action, before=None, after=None, note=""):
-    return store.x("INSERT INTO versions(ts, side, cid, name, action, before, after, note) VALUES(?,?,?,?,?,?,?,?)",
+def _notify(removed=(), upserted=()):
+    if listener:
+        try:
+            listener(removed=list(removed), upserted=list(upserted))
+        except Exception:
+            log.exception("updating the page data after a change failed")
+
+
+def _version(side, cid, name, action, before=None, after=None, note="", batch=None):
+    return store.x("INSERT INTO versions(ts, side, cid, name, action, before, after, note, batch) "
+                   "VALUES(?,?,?,?,?,?,?,?,?)",
                    (time.time(), side, cid, name, action, json.dumps(before) if before is not None else None,
-                    json.dumps(after) if after is not None else None, note))
+                    json.dumps(after) if after is not None else None, note, batch))
 
 
 def _fresh(member):
@@ -87,21 +103,41 @@ def _fresh(member):
     return raw, model.from_people(raw, {})
 
 
-def _write_side(side, cid, rec):
-    """Create (cid None) or update one side from an editable record. Returns (raw after, warnings)."""
-    if side == "microsoft":
-        body, warn = model.to_graph(rec)
-        with net.writes_allowed():
-            raw = msgraph.update_contact(cid, body) if cid else msgraph.create_contact(body)
-        return raw, warn
-    body = model.to_people(rec)
+def _id_of(side, raw):
+    return raw.get("id") if side == "microsoft" else raw.get("resourceName")
+
+
+def _send(side, cid, rec=None, base=None, raw=None):
+    """One write. rec: edit merged onto base (the current raw). raw: a saved copy written back as
+    it was. cid None = create. Returns (raw after, warnings)."""
+    warn = []
     with net.writes_allowed():
-        if cid:
-            body["etag"] = google.get_person(cid)["etag"]
-            raw = google.update_person(cid, body, model.GOOGLE_FIELDS)
+        if side == "microsoft":
+            if raw is not None:
+                body = model.graph_writable(raw)
+            else:
+                body, warn = model.to_graph(rec, base)
+            out = msgraph.update_contact(cid, body) if cid else msgraph.create_contact(body)
         else:
-            raw = google.create_person(body)
-    return raw, []
+            if raw is not None:
+                body, fields = model.people_writable(raw), model.GOOGLE_ALL_FIELDS
+            else:
+                body, fields = model.to_people(rec, base), model.GOOGLE_FIELDS
+            if cid:
+                body["etag"] = (base or {}).get("etag") or google.get_person(cid)["etag"]
+                out = google.update_person(cid, body, fields)
+            else:
+                try:
+                    out = google.create_person(body)
+                except net.HttpError as e:
+                    if raw is not None and body.get("memberships") and e.status == 400:
+                        # a label it belonged to no longer exists: restore without labels
+                        body["memberships"] = []
+                        out = google.create_person(body)
+                        warn.append("a Google label it was in no longer exists, so it was restored without labels")
+                    else:
+                        raise
+    return out, warn
 
 
 def _one_per_side(members):
@@ -110,34 +146,54 @@ def _one_per_side(members):
         raise Refused("This person has duplicate copies on one side. Merge them first (cleanup).")
 
 
+def _partial(done, side, e):
+    ok = ", ".join(SIDE_NAME[s] for s in done) or "nothing"
+    return Refused(f"Done on {ok}; failed on {SIDE_NAME[side]}: {e}. The two copies may differ now: "
+                   "check the contact and try again.")
+
+
 def update(members, rec, action="edit", note=""):
     """Write an edited record to every copy of a person (one per side). Returns warnings."""
     _one_per_side(members)
     with _lock:
         fresh = [(m, *_fresh(m)) for m in members]
         _check(model.display_name(rec), *[c["name"] for _, _, c in fresh])
-        warnings = []
+        batch, warnings, done, upserted = uuid.uuid4().hex, [], [], []
         for m, raw, c in fresh:
-            vid = _version(m["side"], m["id"], c["name"], action, before=raw, note=note)
-            after, warn = _write_side(m["side"], m["id"], rec)
+            vid = _version(m["side"], m["id"], c["name"], action, before=raw, note=note, batch=batch)
+            try:
+                after, warn = _send(m["side"], m["id"], rec=rec, base=raw)
+            except Exception as e:
+                store.x("UPDATE versions SET note=? WHERE id=?", (f"{note} FAILED: {e}"[:400], vid))
+                _notify(upserted=upserted)
+                raise _partial(done, m["side"], e) from None
             store.x("UPDATE versions SET after=? WHERE id=?", (json.dumps(after), vid))
-            warnings += [f"{'Outlook' if m['side'] == 'microsoft' else 'Google'}: {w}" for w in warn]
+            done.append(m["side"])
+            upserted.append((m["side"], after))
+            warnings += [f"{SIDE_NAME[m['side']]}: {w}" for w in warn]
             log.info("%s %s on %s", action, c["name"], m["side"])
+        _notify(upserted=upserted)
         return warnings
 
 
 def create(rec, sides=("microsoft", "google"), action="create", note=""):
-    """Create the contact on the given sides. Returns {side: new id}, warnings."""
+    """Create the contact on the given sides. Returns ({side: new id}, warnings)."""
     with _lock:
         _check(model.display_name(rec))
-        ids, warnings = {}, []
-        for side in sides:
-            after, warn = _write_side(side, None, rec)
-            cid = after.get("id") if side == "microsoft" else after.get("resourceName")
-            ids[side] = cid
-            _version(side, cid, model.display_name(rec), action, after=after, note=note)
-            warnings += warn
-            log.info("%s %s on %s", action, model.display_name(rec), side)
+        ids, warnings, upserted, batch = {}, [], [], uuid.uuid4().hex
+        try:
+            for side in sides:
+                try:
+                    after, warn = _send(side, None, rec=rec)
+                except Exception as e:
+                    raise _partial(list(ids), side, e) from None
+                ids[side] = _id_of(side, after)
+                upserted.append((side, after))
+                _version(side, ids[side], model.display_name(rec), action, after=after, note=note, batch=batch)
+                warnings += warn
+                log.info("%s %s on %s", action, model.display_name(rec), side)
+        finally:
+            _notify(upserted=upserted)
         return ids, warnings
 
 
@@ -151,15 +207,68 @@ def delete(members):
         name = next((c["name"] for _, _, c in fresh if c["name"]), "(no name)")
         bin_id = store.x("INSERT INTO bin(ts, name, ms_raw, g_raw) VALUES(?,?,?,?)",
                          (time.time(), name, json.dumps(ms_raw), json.dumps(g_raw)))
-        for m, raw, c in fresh:
-            _version(m["side"], m["id"], c["name"], "delete", before=raw, note=f"recycle bin #{bin_id}")
-            with net.writes_allowed():
-                if m["side"] == "microsoft":
-                    msgraph.delete_contact(m["id"])
-                else:
-                    google.delete_person(m["id"])
-            log.info("deleted %s on %s (bin #%d)", c["name"], m["side"], bin_id)
+        batch, done, removed = uuid.uuid4().hex, [], []
+        try:
+            for m, raw, c in fresh:
+                vid = _version(m["side"], m["id"], c["name"], "delete", before=raw, note=f"recycle bin #{bin_id}",
+                               batch=batch)
+                try:
+                    with net.writes_allowed():
+                        if m["side"] == "microsoft":
+                            msgraph.delete_contact(m["id"])
+                        else:
+                            google.delete_person(m["id"])
+                except Exception as e:
+                    store.x("UPDATE versions SET note=? WHERE id=?", (f"recycle bin #{bin_id} FAILED: {e}"[:400], vid))
+                    raise _partial(done, m["side"], e) from None
+                done.append(m["side"])
+                removed.append((m["side"], m["id"]))
+                log.info("deleted %s on %s (bin #%d)", c["name"], m["side"], bin_id)
+        finally:
+            _notify(removed=removed)
         return bin_id
+
+
+def restore_bin(bin_id):
+    """Put a deleted contact back in both accounts, each side from its own saved copy (as it was).
+    A side with no saved copy is made from the other side's data. If one side fails, the other's
+    new id is remembered, so trying again only finishes the missing side. Returns (ids, warnings)."""
+    with _lock:
+        row = (store.q("SELECT * FROM bin WHERE id=?", (bin_id,)) or [None])[0]
+        if not row:
+            raise Refused("No such item in the recycle bin.")
+        if row["restored"]:
+            raise Refused("Already restored.")
+        saved = {"microsoft": json.loads(row["ms_raw"] or "[]"), "google": json.loads(row["g_raw"] or "[]")}
+        _check(row["name"])
+        try:
+            ids = json.loads(row["note"] or "{}")
+            ids = ids if isinstance(ids, dict) else {}
+        except ValueError:
+            ids = {}
+        rec = _best_rec(saved["microsoft"], saved["google"])
+        warnings, upserted, batch = [], [], uuid.uuid4().hex
+        try:
+            for side in ("microsoft", "google"):
+                if ids.get(side):
+                    continue                                   # done by an earlier, half-finished try
+                try:
+                    if saved[side]:
+                        after, warn = _send(side, None, raw=saved[side][0])
+                    else:
+                        after, warn = _send(side, None, rec=rec)
+                except Exception as e:
+                    raise _partial([s for s in ids if ids[s]], side, e) from None
+                ids[side] = _id_of(side, after)
+                store.x("UPDATE bin SET note=? WHERE id=?", (json.dumps(ids), bin_id))
+                upserted.append((side, after))
+                _version(side, ids[side], row["name"], "restore", after=after, note=f"from recycle bin #{bin_id}",
+                         batch=batch)
+                warnings += [f"{SIDE_NAME[side]}: {w}" for w in warn]
+            store.x("UPDATE bin SET restored=? WHERE id=?", (time.time(), bin_id))
+        finally:
+            _notify(upserted=upserted)
+        return ids, warnings
 
 
 def _best_rec(ms_raws, g_raws):
@@ -167,31 +276,41 @@ def _best_rec(ms_raws, g_raws):
     cands = [model.from_graph(r) for r in ms_raws] + [model.from_people(r, {}) for r in g_raws]
     if not cands:
         raise Refused("Nothing saved for this contact.")
-    best = max(cands, key=lambda c: c.get("updated") or "")
-    return model.editable(best)
-
-
-def restore_bin(bin_id):
-    """Put a deleted contact back in both accounts. Returns (ids, warnings)."""
-    row = (store.q("SELECT * FROM bin WHERE id=?", (bin_id,)) or [None])[0]
-    if not row:
-        raise Refused("No such item in the recycle bin.")
-    if row["restored"]:
-        raise Refused("Already restored.")
-    rec = _best_rec(json.loads(row["ms_raw"] or "[]"), json.loads(row["g_raw"] or "[]"))
-    ids, warnings = create(rec, action="restore", note=f"from recycle bin #{bin_id}")
-    store.x("UPDATE bin SET restored=?, note=? WHERE id=?", (time.time(), json.dumps(ids), bin_id))
-    return ids, warnings
+    return model.editable(max(cands, key=lambda c: c.get("updated") or ""))
 
 
 def restore_version(version_id, members):
-    """Put an earlier version back on every copy of the person."""
+    """Put back the state from before a change, on every copy of the person: each side from its
+    own saved copy of that change; a side without one gets the other side's data."""
+    _one_per_side(members)
     row = (store.q("SELECT * FROM versions WHERE id=?", (version_id,)) or [None])[0]
     if not row or not row["before"]:
         raise Refused("That version can't be restored.")
-    raw = json.loads(row["before"])
-    rec = _best_rec([raw] if row["side"] == "microsoft" else [], [raw] if row["side"] == "google" else [])
-    return update(members, rec, action="restore", note=f"version #{version_id}")
+    same = store.q("SELECT * FROM versions WHERE batch=? AND before IS NOT NULL", (row["batch"],)) if row["batch"] else [row]
+    saved = {r["side"]: json.loads(r["before"]) for r in same}
+    rec = _best_rec([saved["microsoft"]] if "microsoft" in saved else [], [saved["google"]] if "google" in saved else [])
+    with _lock:
+        fresh = [(m, *_fresh(m)) for m in members]
+        names = [c["name"] for _, _, c in fresh] + [model.display_name(rec)]
+        _check(*names)
+        batch, warnings, done, upserted = uuid.uuid4().hex, [], [], []
+        for m, raw, c in fresh:
+            vid = _version(m["side"], m["id"], c["name"], "restore", before=raw, note=f"version #{version_id}", batch=batch)
+            try:
+                if m["side"] in saved:
+                    after, warn = _send(m["side"], m["id"], raw=saved[m["side"]], base=raw)
+                else:
+                    after, warn = _send(m["side"], m["id"], rec=rec, base=raw)
+            except Exception as e:
+                store.x("UPDATE versions SET note=? WHERE id=?", (f"version #{version_id} FAILED: {e}"[:400], vid))
+                _notify(upserted=upserted)
+                raise _partial(done, m["side"], e) from None
+            store.x("UPDATE versions SET after=? WHERE id=?", (json.dumps(after), vid))
+            done.append(m["side"])
+            upserted.append((m["side"], after))
+            warnings += [f"{SIDE_NAME[m['side']]}: {w}" for w in warn]
+        _notify(upserted=upserted)
+        return warnings
 
 
 def history(ids):

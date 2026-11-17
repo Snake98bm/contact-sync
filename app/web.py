@@ -675,7 +675,7 @@ def contact_edit_page(p, rec, error="", write_mode="test"):
         f'<label>Emails</label><textarea name="emails" rows="3" style="width:100%;max-width:480px">{esc(emails)}</textarea>'
         f'<div class="hint">One per line. Outlook keeps up to 3.</div>'
         f'<label>Phones</label><textarea name="phones" rows="4" style="width:100%;max-width:480px">{esc(phones)}</textarea>'
-        f'<div class="hint">One per line as <code>number | type</code>; type is one of {", ".join(PHONE_TYPES)}.</div>'
+        f'<div class="hint">One per line as <code>number | type</code>; type is usually one of {", ".join(PHONE_TYPES)} (other labels are kept).</div>'
         f'<div class="grid2" style="margin-top:14px">{addr_html}</div>'
         f'<label>Birthday</label><input type="text" name="birthday" value="{v("birthday")}" placeholder="YYYY-MM-DD or --MM-DD">'
         f'<label>Notes</label><textarea name="notes" rows="6" style="width:100%">{v("notes")}</textarea>'
@@ -685,22 +685,29 @@ def contact_edit_page(p, rec, error="", write_mode="test"):
     return page("Edit", "/contacts", body)
 
 
-def parse_edit_form(f):
-    """Form fields -> editable record (see model.EDIT_FIELDS). Raises ValueError for bad input."""
+def parse_edit_form(f, validate=True):
+    """Form fields -> editable record (see model.EDIT_FIELDS). Raises ValueError for bad input,
+    unless validate=False (used to show the form again with what was typed)."""
+    if not validate:
+        def bad(msg):
+            return None
+    else:
+        def bad(msg):
+            raise ValueError(msg)
     rec = {k: (f(k) or "").strip() for k in ("given", "middle", "family", "company", "title", "birthday")}
     rec["notes"] = (f("notes") or "").replace("\r\n", "\n").strip()
     rec["emails"] = [e.strip() for e in (f("emails") or "").splitlines() if e.strip()]
     for e in rec["emails"]:
         if "@" not in e or " " in e:
-            raise ValueError(f"“{e}” doesn't look like an email address.")
+            bad(f"“{e}” doesn't look like an email address.")
     rec["phones"] = []
     for line in (f("phones") or "").splitlines():
         if not line.strip():
             continue
         num, _, typ = line.partition("|")
         typ = typ.strip().lower() or "mobile"
-        if typ not in PHONE_TYPES:
-            raise ValueError(f"Phone type “{typ}” isn't one of: {', '.join(PHONE_TYPES)}.")
+        if not re.fullmatch(r"[a-z][a-z0-9 \-]{0,29}", typ):      # custom labels (Google) are fine
+            bad(f"Phone type “{typ}” should be a short word like {', '.join(PHONE_TYPES)}.")
         rec["phones"].append({"value": num.strip(), "type": typ})
     rec["addr"] = []
     for t in ("home", "work", "other"):
@@ -710,9 +717,9 @@ def parse_edit_form(f):
             rec["addr"].append(a)
     b = rec["birthday"]
     if b and not (re.fullmatch(r"\d{4}-\d{2}-\d{2}", b) or re.fullmatch(r"--\d{2}-\d{2}", b)):
-        raise ValueError("Birthday must look like 1980-02-03, or --02-03 without a year.")
+        bad("Birthday must look like 1980-02-03, or --02-03 without a year.")
     if not (rec["given"] or rec["family"] or rec["company"]):
-        raise ValueError("Give a first name, last name or company.")
+        bad("Give a first name, last name or company.")
     return rec
 
 

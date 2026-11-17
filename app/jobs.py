@@ -34,29 +34,31 @@ class Runner:
         self.progress["step"] = text
         log.info(text)
 
-    def refresh(self):
-        """Re-read both accounts and rebuild the report in memory, without a backup folder.
-        Used right after a change so the pages show it. Skipped while a backup is running."""
-        with self._lock:
-            if self.progress["running"]:
-                return False
-        contacts, notes = [], []
-        if msgraph.status()["state"] == "ok":
-            contacts += [model.from_graph(c) for c in msgraph.fetch_all()[0]]
-        if google.status()["state"] == "ok":
-            people, groups = google.fetch_all()
-            names = {g["resourceName"]: g.get("formattedName") or g.get("name") for g in groups}
-            contacts += [model.from_people(p, names) for p in people]
+    def apply_change(self, removed=(), upserted=()):
+        """After a write: update the in-memory report from the raw replies the write already got,
+        instead of downloading every contact again. removed = [(side, id)], upserted = [(side, raw)]."""
+        r = self.report
+        if not r or "people" not in r:
+            return
+        gone = {(s, i) for s, i in removed}
+        new = {}
+        for side, raw in upserted:
+            c = (model.from_graph(dict(raw, _folder=raw.get("_folder", "Contacts"))) if side == "microsoft"
+                 else model.from_people(raw, r.get("group_names") or {}))
+            new[(side, c["id"])] = c
+        contacts = [c for p in r["people"] for c in p["members"]
+                    if (c["side"], c["id"]) not in gone and (c["side"], c["id"]) not in new]
+        contacts += list(new.values())
         report = clean.analyse(contacts, store.load_settings().get("default_region", "US"))
-        report.update(created=time.time(), backup=(self.report or {}).get("backup"), notes=notes)
+        for k in ("created", "backup", "notes", "group_names"):
+            report[k] = r.get(k)
         self.report = report
-        return True
 
     def _run(self, trigger):
         rid = store.x("INSERT INTO runs(started, trigger) VALUES(?, ?)", (time.time(), trigger))
         settings = store.load_settings()
         raw_ms = raw_g = None
-        contacts, notes = [], []
+        contacts, notes, names = [], [], {}
         try:
             if msgraph.status()["state"] == "ok":
                 self._step("Reading Microsoft 365 contacts")
@@ -82,6 +84,7 @@ class Runner:
             report["created"] = time.time()
             report["backup"] = name
             report["notes"] = notes
+            report["group_names"] = names
             with open(os.path.join(store.BACKUP_DIR, name, "report.json"), "w") as f:
                 json.dump(report, f)
             os.chmod(os.path.join(store.BACKUP_DIR, name, "report.json"), 0o600)

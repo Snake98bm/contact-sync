@@ -74,8 +74,11 @@ def check_allowed(method, url):
 
 def request(method, url, *, form=None, body=None, headers=None, timeout=60, retries=4):
     """Send a request and return the parsed JSON (or {} for an empty body).
-    Retries 429 and 5xx with backoff, honouring Retry-After."""
+    Retries 429 (always: the server did nothing) with backoff, honouring Retry-After. 5xx and
+    network errors are retried only for requests that are safe to repeat: never for a POST that
+    creates something, because the first one may have worked and a repeat would make a duplicate."""
     check_allowed(method, url)
+    repeatable = method != "POST" or url.startswith(ALLOWED_POST_PREFIXES)
     data = None
     hdrs = {"User-Agent": USER_AGENT, "Accept": "application/json"}
     if form is not None:
@@ -93,13 +96,13 @@ def request(method, url, *, form=None, body=None, headers=None, timeout=60, retr
                 return json.loads(raw) if raw.strip() else {}
         except urllib.error.HTTPError as e:
             text = e.read().decode("utf-8", "replace")
-            if (e.code == 429 or e.code >= 500) and attempt < retries:
+            if (e.code == 429 or (e.code >= 500 and repeatable)) and attempt < retries:
                 wait = e.headers.get("Retry-After")
                 time.sleep(min(float(wait), 60) if wait and wait.isdigit() else 2 ** attempt * 2)
                 continue
             raise HttpError(e.code, text, url) from None
-        except urllib.error.URLError:
-            if attempt < retries:
+        except (urllib.error.URLError, TimeoutError, ConnectionError):
+            if repeatable and attempt < retries:
                 time.sleep(2 ** attempt * 2)
                 continue
             raise

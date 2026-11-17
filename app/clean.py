@@ -89,10 +89,13 @@ def names_match(a, b):
     other, or the first names agree (titles like Dr ignored). A shared phone or email between
     'Jane Example' and 'John Example' (a household line) is not enough."""
     ka, kb = name_key(a), name_key(b)
-    if not ka or not kb or ka == kb or ka in kb or kb in ka:
+    if not ka or not kb or ka == kb:
         return True
     fa = [t for t in ka.split() if t not in TITLES]
     fb = [t for t in kb.split() if t not in TITLES]
+    # one name inside the other, as whole words ("Greg" / "Greg Smith", not "Ann" / "Joann Example")
+    if fa and fb and (set(fa) <= set(fb) or set(fb) <= set(fa)):
+        return True
     if not (fa and fb):
         return False
     if fa[0] == fb[0]:

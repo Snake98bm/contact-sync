@@ -67,6 +67,13 @@ def test_household_line_not_merged():
     assert k["shared_info"] == 1 and len(r["shared_info"][0]["contacts"]) == 4
 
 
+def test_whole_word_containment():
+    ann, joann, greg, greg_smith = (c("microsoft", i, n) for i, n in
+                                    (("1", "Ann"), ("2", "Joann Example"), ("3", "Greg"), ("4", "Greg Smith")))
+    assert not clean.names_match(ann, joann)
+    assert clean.names_match(greg, greg_smith)
+
+
 def test_variants_and_renames():
     contacts = [
         c("microsoft", "m1", "Micheal Example", [], ["555-555-0130"]),
