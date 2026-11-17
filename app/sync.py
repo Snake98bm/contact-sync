@@ -27,6 +27,7 @@ import google
 import model
 import msgraph
 import net
+import par
 import store
 import writer
 
@@ -207,6 +208,7 @@ def run(trigger="schedule", allow_deletes=False):
     state.update(running=True, step="Reading both accounts")
     rid = store.x("INSERT INTO sync_runs(started, trigger) VALUES(?,?)", (time.time(), trigger))
     c = {"created": 0, "updated": 0, "deleted": 0, "linked_new": 0, "conflicts": 0, "skipped": 0}
+    counts = c                     # workers add their own counts into this one
     lines, blocked = [], None
     try:
         if not enabled():
@@ -249,11 +251,13 @@ def run(trigger="schedule", allow_deletes=False):
         for lk, m in gone:
             if len(m) == 2:                                 # gone from both: just forget the link
                 store.x("DELETE FROM links WHERE id=?", (lk["id"],))
-        for lk, gone_side in to_delete:
+        def one_delete(job):
+            lk, gone_side = job
+            c, lines = dict.fromkeys(counts, 0), []
             keep = OTHER[gone_side]
             if test and not is_test(lk["name"]):
                 c["skipped"] += 1
-                continue
+                return c, lines
             try:
                 saved = {gone_side: [json.loads(lk[COL[gone_side][2]] or "{}")]}
                 photo = backup.latest_photo(gone_side, lk[COL[gone_side][0]])    # it's gone: use last night's
@@ -271,19 +275,33 @@ def run(trigger="schedule", allow_deletes=False):
                 log.exception("sync delete failed")
                 c["skipped"] += 1
                 lines.append(f"Failed deleting “{lk['name']}”: {e}"[:300])
+            return c, lines
 
-        # 2) links present on both sides
+        def add_up(results):                       # each worker counted on its own: add them up
+            for wc, wl in results:
+                for k, v in wc.items():
+                    counts[k] += v
+                lines.extend(wl)
+
+        add_up(par.run_all(one_delete, to_delete))
+
+        # 2) links present on both sides (several at once: each link is its own pair of contacts)
         state["step"] = "Copying changes"
-        for lk in links():
+
+        def one_merge(lk):
+            c, lines = dict.fromkeys(counts, 0), []
             a, b = data["microsoft"].get(lk["ms_id"]), data["google"].get(lk["g_id"])
             if a is None or b is None:
-                continue
+                return c, lines
             try:
                 _merge(lk, a, b, test, c, lines)
             except Exception as e:
                 log.exception("sync of one contact failed")
                 c["skipped"] += 1
                 lines.append(f"Failed syncing “{lk['name']}”: {e}"[:300])
+            return c, lines
+
+        add_up(par.run_all(one_merge, links()))
 
         # 3) contacts that appeared since the last run
         state["step"] = "Adding new contacts"

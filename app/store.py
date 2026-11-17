@@ -21,6 +21,7 @@ DEFAULT_SETTINGS = {
     "sync_enabled": False,      # set by "Start syncing" on the Sync page
     "sync_minutes": 60,         # hourly
     "sync_max_deletes": 10,     # more deletes than this in one run wait for your OK
+    "workers": 10,              # sync and cleanup change this many contacts at the same time
 }
 
 _lock = threading.Lock()

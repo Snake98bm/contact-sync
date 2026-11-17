@@ -69,6 +69,41 @@ def writes_allowed():
         _write.on = False
 
 
+# Pacing per service, shared by every worker: a small gap between requests that grows when the service
+# answers 429 (too many requests) and shrinks back as requests go through.
+MIN_GAP = {"people.googleapis.com": 0.1, "graph.microsoft.com": 0.05}
+_pace, _pace_lock = {}, threading.Lock()
+# Google asks for changes to one user's contacts to be sent one at a time ("mutate requests for the same
+# user should be sent sequentially"); reads, and Outlook, can go in parallel.
+_google_writes = threading.Lock()
+
+
+def _host(url):
+    return urllib.parse.urlsplit(url).hostname or ""
+
+
+def _wait_turn(url):
+    host = _host(url)
+    with _pace_lock:
+        p = _pace.setdefault(host, [MIN_GAP.get(host, 0.0), 0.0])
+        now = time.monotonic()
+        start = max(now, p[1])
+        p[1] = start + p[0]
+    if start > now:
+        time.sleep(start - now)
+
+
+def _paced(url, ok):
+    host = _host(url)
+    with _pace_lock:
+        p = _pace.setdefault(host, [MIN_GAP.get(host, 0.0), 0.0])
+        p[0] = max(MIN_GAP.get(host, 0.0), p[0] * 0.95) if ok else min(max(p[0] * 2, 0.5), 5.0)
+
+
+def _serial(method, url):
+    return _google_writes if method != "GET" and _host(url) == "people.googleapis.com" else contextlib.nullcontext()
+
+
 def check_allowed(method, url):
     if method == "GET":
         return
@@ -98,11 +133,16 @@ def request(method, url, *, form=None, body=None, headers=None, timeout=60, retr
     for attempt in range(retries + 1):
         req = urllib.request.Request(url, data=data, headers=hdrs, method=method)
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                raw = r.read().decode("utf-8", "replace")
-                return json.loads(raw) if raw.strip() else {}
+            with _serial(method, url):
+                _wait_turn(url)
+                with urllib.request.urlopen(req, timeout=timeout) as r:
+                    raw = r.read().decode("utf-8", "replace")
+            _paced(url, True)
+            return json.loads(raw) if raw.strip() else {}
         except urllib.error.HTTPError as e:
             text = e.read().decode("utf-8", "replace")
+            if e.code == 429:
+                _paced(url, False)
             if (e.code == 429 or (e.code >= 500 and repeatable)) and attempt < retries:
                 wait = e.headers.get("Retry-After")
                 time.sleep(min(float(wait), 60) if wait and wait.isdigit() else 2 ** attempt * 2)
@@ -126,12 +166,18 @@ def request_bytes(method, url, *, data=None, content_type=None, headers=None, ti
     for attempt in range(retries + 1):
         req = urllib.request.Request(url, data=data, headers=hdrs, method=method)
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                return r.read()
+            with _serial(method, url):
+                _wait_turn(url)
+                with urllib.request.urlopen(req, timeout=timeout) as r:
+                    body = r.read()
+            _paced(url, True)
+            return body
         except urllib.error.HTTPError as e:
             text = e.read().decode("utf-8", "replace")
             if e.code == 404:
                 return None
+            if e.code == 429:
+                _paced(url, False)
             if (e.code == 429 or (e.code >= 500 and method == "GET")) and attempt < retries:
                 time.sleep(2 ** attempt * 2)
                 continue

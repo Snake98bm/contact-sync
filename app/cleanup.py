@@ -27,6 +27,7 @@ import clean
 import google
 import model
 import msgraph
+import par
 import store
 import sync
 import writer
@@ -34,7 +35,7 @@ import writer
 log = logging.getLogger("cleanup")
 LABEL = {"microsoft": "Microsoft 365", "google": "Google"}
 ORDER = ("tidy", "address", "combine", "shared", "copy", "label", "category")
-PAUSE = 0.6               # between writes: stays well under Google's per-minute write limit
+PAUSE = 0.2               # between items, per worker (net.py also paces each service and slows on 429)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS cleanup_plans(id INTEGER PRIMARY KEY, created REAL, plan TEXT, applied REAL, result TEXT);
@@ -410,6 +411,29 @@ def _say(line):
     log.info(line)
 
 
+def _groups(items):
+    """Items joined when they share any contact (members, or the whole person for a delete), in plan order."""
+    parent = list(range(len(items)))
+
+    def root(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    owner = {}
+    for n, i in enumerate(items):
+        for m in (i.get("members") or []) + (i.get("person") or []):
+            k = (m["side"], m["id"])
+            if k in owner:
+                parent[root(n)] = root(owner[k])
+            else:
+                owner[k] = n
+    out = {}
+    for n, i in enumerate(items):
+        out.setdefault(root(n), []).append(i)
+    return list(out.values())
+
+
 def _apply(plan_id, selected, backup_runner):
     selected = _choices(selected)
     region = store.load_settings().get("default_region", "US")
@@ -436,25 +460,37 @@ def _apply(plan_id, selected, backup_runner):
             if backup_runner.progress.get("error"):
                 raise RuntimeError("The backup failed, so nothing was changed: " + backup_runner.progress["error"])
         names = {}
-        for i in items:
+        tally = threading.Lock()
+
+        def one(i):
+            nonlocal ok, failed, skipped
             state["step"] = f"{i['kind']}: {i['title']}"
+            outcome = "skipped"
             try:
                 result = {"tidy": _do_tidy, "address": _do_address, "combine": _do_combine, "shared": _do_shared, "copy": _do_copy,
                           "label": _do_label, "category": _do_category}[i["kind"]](i, region, names)
                 if result:
                     _say(f"✓ {i['title']}: {result}")
-                    ok += 1
-                else:
-                    skipped += 1
+                    outcome = "ok"
             except writer.Refused as e:
                 _say(f"– {i['title']}: skipped ({e})")
-                skipped += 1
             except Exception as e:
                 log.exception("cleanup item failed")
                 _say(f"✗ {i['title']}: failed ({e})"[:300])
-                failed += 1
-            state["done"] += 1
+                outcome = "failed"
+            with tally:
+                ok += outcome == "ok"
+                failed += outcome == "failed"
+                skipped += outcome == "skipped"
+                state["done"] += 1
             time.sleep(PAUSE)
+
+        # items that touch the same contact run in order, in one worker; different people run at once
+        per_contact = [i for i in items if i["kind"] not in ("label", "category")]
+        par.run_all(lambda grp: [one(i) for i in grp], _groups(per_contact))
+        for i in items:                              # account-wide steps last, one at a time
+            if i["kind"] in ("label", "category"):
+                one(i)
     except Exception as e:
         _say(f"Stopped: {e}")
         failed += 1

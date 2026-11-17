@@ -280,6 +280,41 @@ def test_cleanup():
     assert not writer.busy["cleanup"]
 
 
+def test_parallel_pieces():
+    import threading
+    import time as t
+    m = lambda s, i: {"side": s, "id": i}
+    items = [{"id": 1, "members": [m("google", "a")]}, {"id": 2, "members": [m("google", "b")]},
+             {"id": 3, "members": [m("microsoft", "x"), m("google", "a")]}, {"id": 4, "members": [m("google", "c")],
+             "person": [m("microsoft", "x")]}]
+    groups = sorted([[i["id"] for i in g] for g in cleanup._groups(items)])
+    assert groups == [[1, 3, 4], [2]], groups                 # same contact: one worker, plan order
+    # the writer locks one contact at a time: two people at once, the same person never
+    events = []
+
+    def hold(cid, tag):
+        with writer._hold([m("google", cid)]):
+            events.append(("in", tag))
+            t.sleep(0.2)
+            events.append(("out", tag))
+    th = [threading.Thread(target=hold, args=a) for a in (("p1", "A"), ("p1", "B"), ("p2", "C"))]
+    for x in th:
+        x.start()
+    for x in th:
+        x.join()
+    order = [e for e in events if e[1] in "AB"]
+    assert order in ([("in", "A"), ("out", "A"), ("in", "B"), ("out", "B")],
+                     [("in", "B"), ("out", "B"), ("in", "A"), ("out", "A")]), events
+    assert events.index(("in", "C")) < events.index(("out", events[0][1])), events    # p2 didn't wait
+    # pacing: a 429 widens the gap for that service, successes narrow it again
+    url = "https://people.googleapis.com/v1/x"
+    net._paced(url, False)
+    assert net._pace["people.googleapis.com"][0] >= 0.5
+    for _ in range(200):
+        net._paced(url, True)
+    assert net._pace["people.googleapis.com"][0] == net.MIN_GAP["people.googleapis.com"]
+
+
 def test_address_typed_two_ways_is_one_row():
     mode("on")
     ms("AAM-twin", "Twin", "Example", "twin@example.com",

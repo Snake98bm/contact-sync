@@ -11,6 +11,7 @@
 - Outlook also keeps deleted contacts in Deleted Items, and Google in Trash for 30 days.
 """
 import base64
+import contextlib
 import json
 import logging
 import threading
@@ -38,8 +39,25 @@ CREATE TABLE IF NOT EXISTS bin(
   id INTEGER PRIMARY KEY, ts REAL, name TEXT, ms_raw TEXT, g_raw TEXT, restored REAL, note TEXT);
 """
 
-_lock = threading.Lock()
+_lock = threading.Lock()          # whole-account jobs (restore from the bin, label delete)
+_locks, _locks_guard = {}, threading.Lock()
 _scope = threading.local()
+
+
+@contextlib.contextmanager
+def _hold(members):
+    """Lock just these contacts, so changes to different people can run at the same time
+    (sync and cleanup use several workers) while two changes to one person never overlap."""
+    keys = sorted({(m["side"], m["id"]) for m in members if m.get("id")})
+    with _locks_guard:
+        ls = [_locks.setdefault(k, threading.Lock()) for k in keys]
+    for lk in ls:
+        lk.acquire()
+    try:
+        yield
+    finally:
+        for lk in reversed(ls):
+            lk.release()
 # Long jobs that must not overlap: the cleanup sets busy["cleanup"], the sync sets busy["sync"].
 # Each checks the other before it starts.
 busy = {"cleanup": False, "sync": False}
@@ -197,7 +215,7 @@ def _partial(done, side, e):
 def update(members, rec, action="edit", note=""):
     """Write an edited record to every copy of a person (one per side). Returns warnings."""
     _one_per_side(members)
-    with _lock:
+    with _hold(members):
         fresh = [(m, *_fresh(m)) for m in members]
         _check(model.display_name(rec), *[c["name"] for _, _, c in fresh])
         batch, warnings, done, upserted = uuid.uuid4().hex, [], [], []
@@ -220,7 +238,7 @@ def update(members, rec, action="edit", note=""):
 
 def create(rec, sides=("microsoft", "google"), action="create", note=""):
     """Create the contact on the given sides. Returns ({side: new id}, warnings)."""
-    with _lock:
+    with _hold([]):                 # a new contact: nothing existing to guard
         _check(model.display_name(rec))
         ids, warnings, upserted, batch = {}, [], [], uuid.uuid4().hex
         try:
@@ -244,7 +262,7 @@ def delete(members, also_saved=None, note=""):
     also_saved: {side: [raw]} for a copy that is already gone (sync: deleted in the other account),
     so the bin holds both sides."""
     also_saved = also_saved or {}
-    with _lock:
+    with _hold(members):
         fresh = [(m, *_fresh(m)) for m in members]
         _check(*[c["name"] for _, _, c in fresh])
         ms_raw = [raw for m, raw, _ in fresh if m["side"] == "microsoft"] or list(also_saved.get("microsoft") or [])
@@ -355,7 +373,7 @@ def restore_version(version_id, members):
     same = store.q("SELECT * FROM versions WHERE batch=? AND before IS NOT NULL", (row["batch"],)) if row["batch"] else [row]
     saved = {r["side"]: json.loads(r["before"]) for r in same}
     rec = _best_rec([saved["microsoft"]] if "microsoft" in saved else [], [saved["google"]] if "google" in saved else [])
-    with _lock:
+    with _hold(members):
         fresh = [(m, *_fresh(m)) for m in members]
         names = [c["name"] for _, _, c in fresh] + [model.display_name(rec)]
         _check(*names)
@@ -381,7 +399,7 @@ def restore_version(version_id, members):
 
 def patch_graph(cid, patch, name, note=""):
     """Change Outlook-only properties (e.g. categories) on one Microsoft contact, keeping a copy first."""
-    with _lock:
+    with _hold([{"side": "microsoft", "id": cid}]):
         _check(name)
         raw = msgraph.get_contact(cid)
         vid = _version("microsoft", cid, name, "cleanup", before=raw, note=note, batch=uuid.uuid4().hex)
