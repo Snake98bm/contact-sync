@@ -168,9 +168,21 @@ def test_cleanup():
     assert "Write mode must be" in cleanup.state["log"][-1] and "AAM-j2" in MS
     mode("on")
 
-    # apply everything that starts ticked
+    # what the page sends: everything that starts ticked, Jackie combined under an edited name,
+    # and the shared household number removed from Bob only
+    jackie = combos["Jackie Sample"]
+    assert {o["label"] for o in jackie["names"]} == {"Jackie Sample"}
+    sh = shared[0]
+    bob = next(k for k, p in enumerate(sh["people"]) if p["name"] == "Bob Example")
+    form = {"plan_id": str(plan["plan_id"]), f"given_{jackie['id']}": "Jacqueline", f"family_{jackie['id']}": "Sample",
+            f"shared_{sh['id']}": "strip"}
+    multi = {"item": [str(i["id"]) for i in items if i["default"]], f"strip_{sh['id']}": [str(bob)]}
+    selected = cleanup.choices_from_form(plan["plan_id"], lambda k: form.get(k, ""), lambda k: multi.get(k, []))
+    assert selected[jackie["id"]] == {"mode": "combine", "name": {"given": "Jacqueline", "middle": "", "family": "Sample",
+                                                                  "company": ""}}
+    assert selected[sh["id"]] == {"mode": "strip", "people": [bob]}
     cleanup.state["log"] = []
-    cleanup._apply(plan["plan_id"], {i["id"] for i in items if i["default"]}, None)
+    cleanup._apply(plan["plan_id"], selected, None)
     log = "\n".join(cleanup.state["log"])
     assert "✗" not in log, log
     g = G["people/c-greg"]
@@ -180,8 +192,9 @@ def test_cleanup():
     assert MS["AAM-greg"]["personalNotes"] == "Gate code 12" and MS["AAM-greg"]["mobilePhone"] == "(559) 555-1234"
     assert MS["AAM-greg"]["emailAddresses"][0]["address"] == "greg@example.com"
     # Jackie: one Outlook copy left, with both notes and the email; the other in the bin; linked
-    jackies = [c for c in MS.values() if c.get("givenName") == "Jackie"]
+    jackies = [c for c in MS.values() if c.get("surname") == "Sample"]
     assert len(jackies) == 1 and "note one" in jackies[0]["personalNotes"] and "note two" in jackies[0]["personalNotes"]
+    assert jackies[0]["givenName"] == "Jacqueline" and G["people/c-j"]["names"][0]["givenName"] == "Jacqueline"
     assert any(b["name"] == "Jackie Sample" for b in writer.bin_items())
     assert store.q("SELECT 1 FROM links WHERE ms_id=? AND g_id='people/c-j'", (jackies[0]["id"],))
     assert store.q("SELECT 1 FROM links WHERE ms_id='AAM-v' AND g_id='people/c-v'")
@@ -189,6 +202,9 @@ def test_cleanup():
     solo_g = [p for p in G.values() if (p.get("names") or [{}])[0].get("givenName") == "Solo"]
     assert len(solo_g) == 1 and store.q("SELECT 1 FROM links WHERE ms_id='AAM-solo'")
     assert "AAM-a" in MS and "AAM-b" in MS
+    assert MS["AAM-a"]["mobilePhone"] == "(559) 555-0300" and G["people/c-a"]["phoneNumbers"]   # Anna keeps it
+    assert not MS["AAM-b"].get("mobilePhone") and not G["people/c-b"]["phoneNumbers"]            # removed from Bob
+    assert MS["AAM-b"]["emailAddresses"][0]["address"] == "bob@example.com"                      # nothing else lost
     lisas = [c for c in MS.values() if c.get("givenName") == "Lisa"]
     assert len(lisas) == 1 and not any((p.get("names") or [{}])[0].get("givenName") == "Lisa" and p["resourceName"] != "people/c-l"
                                        for p in G.values())

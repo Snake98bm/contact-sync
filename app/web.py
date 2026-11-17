@@ -3,6 +3,7 @@ import html
 import json
 import re
 import time
+import urllib.parse
 
 from version import VERSION
 
@@ -846,12 +847,65 @@ KIND_TITLE = {
                 "account remains and extra copies go to the recycle bin; the two accounts are linked for sync. "
                 "Unticked ones need a look: the names differ."),
     "shared": ("Different names with the same phone or email", "Usually a household line or a business and its "
-               "staff, so these start unticked. Tick one only if it's really one person: it's then combined like "
-               "the section above."),
+               "staff, so each starts as “keep them separate”. To take the number or email off someone, tick "
+               "them (it's removed from both their Microsoft and Google copies; their other numbers stay). "
+               "“Combine” merges them into one contact like the section above."),
     "copy": ("Copy contacts that are only in one account", "Created in the other account and linked for sync."),
     "label": ("Remove a Google label", "Only the label goes; its contacts keep everything else."),
     "category": ("Copy a Google label to Outlook", "Adds an Outlook category to the Outlook copies of its members."),
 }
+
+
+def _name_editor(i):
+    """Pick one of the copies' names (fills the boxes) and/or edit the boxes: they become the name."""
+    n, opts = i["id"], i.get("names") or []
+    if not opts:
+        return ""
+    first = opts[0]
+    radios = "".join(
+        f"<label class='check' style='margin:2px 0;font-weight:500'><input type='radio' name='pick_{n}'"
+        f"{' checked' if k == 0 else ''} onclick=\"nm({n},{json.dumps(o).replace(chr(34), '&quot;')})\"> "
+        f"{esc(o['label'])}</label>" for k, o in enumerate(opts))
+    box = lambda f, ph, w: (f"<input type='text' name='{f}_{n}' id='{f}_{n}' value='{esc(first.get(f, ''))}' "
+                            f"placeholder='{ph}' style='width:{w}px'>")
+    return (f"<details style='margin-top:6px'><summary class='small'>Name: <b id='lbl_{n}'>{esc(first['label'])}"
+            f"</b> (choose or edit)</summary>{radios}<div class='bar' style='margin-top:6px'>"
+            f"{box('given', 'First', 120)}{box('middle', 'Middle', 90)}{box('family', 'Last', 140)}"
+            f"{box('company', 'Company', 180)}</div><div class='hint'>Pick a name to fill the boxes, then change "
+            f"anything. The boxes are what's saved.</div></details>")
+
+
+NAME_JS = """<script>function nm(n,o){for(const f of ['given','middle','family','company']){
+const e=document.getElementById(f+'_'+n);if(e)e.value=o[f]||''}document.getElementById('lbl_'+n).textContent=o.label}
+document.addEventListener('input',e=>{const m=(e.target.id||'').match(/^(given|middle|family|company)_(\\d+)$/);if(!m)return;
+const n=m[2],v=f=>(document.getElementById(f+'_'+n)||{}).value||'';
+document.getElementById('lbl_'+n).textContent=[v('given'),v('middle'),v('family')].filter(x=>x).join(' ')||v('company')})
+</script>"""
+
+
+def _shared_cards(items):
+    """One card per shared phone/email: keep / remove from ticked people / combine."""
+    out = []
+    for i in items:
+        n = i["id"]
+        what = "number" if i.get("kind_of") == "phone" else "email"
+        people = ""
+        for k, p in enumerate(i.get("people") or []):
+            sides = " ".join(pill(*SIDE[m["side"]]) for m in p["members"])
+            people += (f"<label class='check' style='font-weight:500'><input type='checkbox' name='strip_{n}' "
+                       f"value='{k}' onchange=\"if(this.checked)document.getElementById('s{n}strip').checked=true\">"
+                       f"Remove {esc(i.get('shown'))} from <b>{esc(p['name'])}</b> {sides}</label>")
+        out.append(
+            f"<div class='card pad' style='margin-bottom:10px'><b>{esc(i.get('shown'))}</b> "
+            f"<span class='muted'>on {esc(i['title'])}</span>"
+            f"<div class='bar' style='margin:8px 0'>"
+            f"<label class='check' style='margin:0'><input type='radio' name='shared_{n}' value='keep' checked> "
+            f"Keep them separate, leave as is</label>"
+            f"<label class='check' style='margin:0'><input type='radio' name='shared_{n}' value='strip' id='s{n}strip'> "
+            f"Remove the {what} from the people ticked below</label>"
+            f"<label class='check' style='margin:0'><input type='radio' name='shared_{n}' value='combine'> "
+            f"Combine them into one contact</label></div>{people}{_name_editor(i)}</div>")
+    return "".join(out)
 
 
 def cleanup_page(plan, st, write_mode, msg="", error=""):
@@ -892,15 +946,22 @@ def cleanup_page(plan, st, write_mode, msg="", error=""):
         if not items:
             continue
         title, intro = KIND_TITLE[kind]
+        if kind == "shared":
+            b.append(f"<h2>{esc(title)} <span class='muted'>({len(items)})</span></h2><p class='muted small'>{intro}</p>")
+            b.append(_shared_cards(items))
+            continue
         on = sum(1 for i in items if i["default"])
         rows = []
         for i in items:
             who = " ".join(pill(*SIDE[m["side"]]) for m in i["members"][:6]) or ""
             names = ", ".join(sorted({m["name"] for m in i["members"] if m["name"]}))
+            look = (f" · <a href='/contacts?q={urllib.parse.quote(i['members'][0]['name'] or '')}' target='_blank'>"
+                    f"see the copies</a>") if kind == "combine" and i["members"] else ""
             rows.append(f"<tr><td><input type='checkbox' name='item' value='{i['id']}' class='k-{kind}'"
                         f"{' checked' if i['default'] else ''}></td><td>{esc(i['title'])}"
                         + (f"<div class='muted small'>{esc(names)}</div>" if names and names != i['title'] else "")
-                        + f"</td><td>{who}</td><td class='small'>{esc(i['detail'])}</td></tr>")
+                        + (_name_editor(i) if kind == "combine" else "")
+                        + f"</td><td>{who}</td><td class='small'>{esc(i['detail'])}{look}</td></tr>")
         b.append(f"<h2>{esc(title)} <span class='muted'>({on} of {len(items)} ticked)</span></h2>"
                  f"<p class='muted small'>{intro} <a href='#' onclick=\"document.querySelectorAll('.k-{kind}')"
                  f".forEach(x=>x.checked=true);return false\">tick all</a> · <a href='#' onclick=\"document"
@@ -910,4 +971,5 @@ def cleanup_page(plan, st, write_mode, msg="", error=""):
     dis = "" if write_mode == "on" else " disabled"
     b.append(f'<p style="margin-top:20px"><button{dis} onclick="return confirm(\'Apply the ticked changes to both '
              f'accounts? A backup is taken first.\')">Apply the ticked changes</button></p></form>')
+    b.append(NAME_JS)
     return page("Cleanup", "/cleanup", "".join(b))

@@ -411,12 +411,13 @@ class Handler(BaseHTTPRequestHandler):
                 if path == "/cleanup/plan":
                     plan = cleanup.build_plan()
                     return back("msg", f"Plan ready: {len(plan['items'])} items.")
-                ids = [int(x) for x in form_all("item") if x.isdigit()]
-                if not ids:
+                plan_id = int(f("plan_id"))
+                selected = cleanup.choices_from_form(plan_id, f, form_all)
+                if not selected:
                     return back("error", "Nothing was ticked.")
                 if writer.mode() != "on":
                     return back("error", "Switch Settings → Write mode to “on” first.")
-                if not cleanup.start_apply(int(f("plan_id")), ids, runner):
+                if not cleanup.start_apply(plan_id, selected, runner):
                     return back("error", "The cleanup is already running.")
                 return self._redirect("/cleanup")
             except Exception as e:

@@ -130,6 +130,36 @@ def combine_recs(recs, region="US"):
     return out
 
 
+def name_options(contacts):
+    """The different names the copies have, for the owner to pick from when combining."""
+    out, seen = [], set()
+    for c in sorted(contacts, key=lambda c: -len(c.get("name") or "")):
+        given, middle, family = (_unescape(c.get(k)) for k in ("given", "middle", "family"))
+        company = _unescape(c.get("company"))
+        label = " ".join(x for x in (given, middle, family) if x) or company
+        if label and label.lower() not in seen:
+            seen.add(label.lower())
+            out.append({"label": label, "given": given, "middle": middle, "family": family,
+                        "company": company if not (given or family) else ""})
+    return out
+
+
+def apply_name(rec, choice):
+    """Put the chosen name on a combined record. choice: {"given","middle","family"} or a company-only
+    name {"company"} (then the person-name fields are cleared)."""
+    if not choice:
+        return rec
+    rec = dict(rec)
+    c = {k: _unescape(choice.get(k)) for k in ("given", "middle", "family", "company")}
+    if c["given"] or c["family"] or c["middle"]:
+        rec.update(given=c["given"], middle=c["middle"], family=c["family"])
+        if c["company"]:
+            rec["company"] = c["company"]
+    elif c["company"]:
+        rec.update(given="", middle="", family="", company=c["company"])
+    return rec
+
+
 # ---------- plan ----------
 
 def build_plan():
@@ -140,9 +170,15 @@ def build_plan():
     linked = {("microsoft", lk["ms_id"]) for lk in sync.links()} | {("google", lk["g_id"]) for lk in sync.links()}
     items = []
 
+    by_id = {(c["side"], c["id"]): c for c in contacts}
+
     def add(kind, title, detail, members, default, **extra):
-        items.append({"id": len(items) + 1, "kind": kind, "title": title, "detail": detail, "default": default,
-                      "members": [{"side": c["side"], "id": c["id"], "name": c["name"]} for c in members], **extra})
+        item = {"id": len(items) + 1, "kind": kind, "title": title, "detail": detail, "default": default,
+                "members": [{"side": c["side"], "id": c["id"], "name": c["name"]} for c in members], **extra}
+        if kind in ("combine", "shared"):
+            item["names"] = name_options([by_id[(c["side"], c["id"])] for c in members
+                                          if (c["side"], c["id"]) in by_id])
+        items.append(item)
 
     # combine: duplicates, then possible matches between one-sided contacts
     in_combine = set()
@@ -167,14 +203,26 @@ def build_plan():
         in_combine |= {(c["side"], c["id"]) for c in mem}
 
     # different names sharing a phone or email: the owner decides (households, a business and its staff)
+    person_of = {(c["side"], c["id"]): p for p in rep["people"] for c in p["members"]}
     for s in rep["shared_info"]:
         mem = s["contacts"]
         if any((c["side"], c["id"]) in in_combine for c in mem):
             continue
-        names_ = sorted({c["name"] or "(no name)" for c in mem})
-        add("shared", " / ".join(names_), f"Same {s['kind']} {s['value']} on different names. Tick to combine them "
-            "into one contact; leave unticked to keep them as separate people.", mem, False)
-        in_combine |= {(c["side"], c["id"]) for c in mem}
+        people, seen_keys = [], set()
+        for c in mem:                                    # each person with all their copies (both accounts)
+            p = person_of[(c["side"], c["id"])]
+            if p["key"] not in seen_keys:
+                seen_keys.add(p["key"])
+                people.append({"name": p["name"] or "(no name)",
+                               "members": [{"side": x["side"], "id": x["id"], "name": x["name"]} for x in p["members"]]})
+        shown = clean.pretty_phone(s["value"]) if s["kind"] == "phone" else s["value"]
+        all_members = [x for p in people for x in p["members"]]
+        add("shared", " / ".join(p["name"] for p in people),
+            f"Same {s['kind']} {shown} on different names: keep them separate, remove it from some of them, "
+            "or combine them into one contact.",
+            [dict(x, id=x["id"]) for x in all_members], False, kind_of=s["kind"], value=s["value"], shown=shown,
+            people=people)
+        in_combine |= {(x["side"], x["id"]) for x in all_members}
 
     # copy: one side only, not part of any combine
     for p in rep["people"]:
@@ -224,12 +272,43 @@ def latest_plan():
 
 # ---------- apply ----------
 
+def choices_from_form(plan_id, f, form_all):
+    """Read the Cleanup page's form: ticked items, each shared group's choice, and the name boxes."""
+    row = (store.q("SELECT plan FROM cleanup_plans WHERE id=?", (plan_id,)) or [None])[0]
+    if not row:
+        return {}
+    items = {i["id"]: i for i in json.loads(row["plan"])["items"]}
+    ticked = {int(x) for x in form_all("item") if str(x).isdigit()}
+    out = {}
+    for n, i in items.items():
+        name = {k: (f(f"{k}_{n}") or "").strip() for k in ("given", "middle", "family", "company")}
+        name = name if any(name.values()) else None
+        if i["kind"] == "shared":
+            mode = f(f"shared_{n}")
+            if mode == "combine":
+                out[n] = {"mode": "combine", "name": name}
+            elif mode == "strip":
+                people = sorted({int(x) for x in form_all(f"strip_{n}") if str(x).isdigit()
+                                 and int(x) < len(i.get("people") or [])})
+                if people:
+                    out[n] = {"mode": "strip", "people": people}
+        elif n in ticked:
+            out[n] = {"mode": "combine", "name": name} if i["kind"] == "combine" else True
+    return out
+
+
+def _choices(selected):
+    """{item id: choice}. A plain list of ids means "do them"; a shared item takes
+    {"mode": "combine"} or {"mode": "strip", "people": [index, ...]}."""
+    return dict(selected) if isinstance(selected, dict) else {x: True for x in selected}
+
+
 def start_apply(plan_id, selected, backup_runner=None):
     with _lock:
         if state["running"]:
             return False
         state.update(running=True, step="Starting", done=0, total=len(selected), log=[], plan_id=plan_id)
-    threading.Thread(target=_apply, args=(plan_id, set(selected), backup_runner), daemon=True).start()
+    threading.Thread(target=_apply, args=(plan_id, _choices(selected), backup_runner), daemon=True).start()
     return True
 
 
@@ -239,13 +318,14 @@ def _say(line):
 
 
 def _apply(plan_id, selected, backup_runner):
+    selected = _choices(selected)
     region = store.load_settings().get("default_region", "US")
     ok = failed = skipped = 0
     try:
         if writer.mode() != "on":
             raise writer.Refused("Write mode must be “on” (Settings) to clean up real contacts.")
         row = store.q("SELECT * FROM cleanup_plans WHERE id=?", (plan_id,))[0]
-        items = [i for i in json.loads(row["plan"])["items"] if i["id"] in selected]
+        items = [dict(i, choice=selected[i["id"]]) for i in json.loads(row["plan"])["items"] if i["id"] in selected]
         if backup_runner is not None:
             state["step"] = "Taking a backup first"
             backup_runner.start("before cleanup")
@@ -258,7 +338,7 @@ def _apply(plan_id, selected, backup_runner):
         for i in items:
             state["step"] = f"{i['kind']}: {i['title']}"
             try:
-                result = {"tidy": _do_tidy, "combine": _do_combine, "shared": _do_combine, "copy": _do_copy,
+                result = {"tidy": _do_tidy, "combine": _do_combine, "shared": _do_shared, "copy": _do_copy,
                           "label": _do_label, "category": _do_category}[i["kind"]](i, region, names)
                 if result:
                     _say(f"✓ {i['title']}: {result}")
@@ -309,6 +389,8 @@ def _do_combine(item, region, _names):
     if not fresh:
         return ""
     rec = combine_recs([tidy(c, region)[0] for _, _, c in fresh], region)
+    choice = item.get("choice") if isinstance(item.get("choice"), dict) else {}
+    rec = apply_name(rec, choice.get("name"))                 # the name the owner picked or typed
     keepers, extra = {}, []
     for m, raw, c in sorted(fresh, key=lambda x: x[2].get("updated") or "", reverse=True):
         if m["side"] in keepers:
@@ -324,6 +406,37 @@ def _do_combine(item, region, _names):
         sync._new_link(ms_raw, g_raw)
     return (f"combined {len(fresh)} copies" + (f", {len(extra)} sent to the recycle bin" if extra else "")
             + (", linked for sync" if len(keepers) == 2 else ""))
+
+
+def _do_shared(item, region, names):
+    """Different names on one phone/email: combine them, or remove it from the chosen people."""
+    choice = item.get("choice") if isinstance(item.get("choice"), dict) else {}
+    if choice.get("mode") == "combine":
+        return _do_combine(item, region, names)
+    if choice.get("mode") != "strip" or not choice.get("people"):
+        return ""
+    done = []
+    for idx in choice["people"]:
+        person = item["people"][idx]
+        for m in person["members"]:
+            try:
+                raw, c = _fresh(m)
+            except Exception:
+                continue
+            rec, _, _ = tidy(c, region)
+            if item["kind_of"] == "phone":
+                keep = [p for p in rec["phones"] if clean.norm_phone(p["value"], region)[0] != item["value"]]
+                if len(keep) == len(rec["phones"]):
+                    continue
+                rec["phones"] = keep
+            else:
+                keep = [e for e in rec["emails"] if e.strip().lower() != item["value"]]
+                if len(keep) == len(rec["emails"]):
+                    continue
+                rec["emails"] = keep
+            writer.update([m], rec, action="cleanup", note=f"cleanup: removed shared {item['kind_of']} {item['shown']}")
+        done.append(person["name"])
+    return f"removed {item['shown']} from {', '.join(done)}" if done else ""
 
 
 def _do_copy(item, region, _names):
