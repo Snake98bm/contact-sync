@@ -233,17 +233,50 @@ def zip_cities(addresses):
     return {z: cnt.most_common(1)[0][0] for z, cnt in seen.items()}
 
 
+PO_RE = re.compile(r"\b(?:p\.?\s*o\.?\s*box|post\s+office\s+box)\s*#?\s*([\w-]+)", re.I)
+ZIP_WORD_RE = re.compile(r"[,\s]*\bzip(?:\s*code)?\s*[:#]?\s*(\d{5}(?:-\d{4})?)\b", re.I)
+
+
+def _street_extras(a):
+    """'Note P.O. Box 12 zip 90000' in the street box: ZIP to the ZIP box, street as 'P.O. Box 12'."""
+    a, how, sure = dict(a), [], True
+    street = (a.get("street") or "").replace("\r", "")
+    m = ZIP_WORD_RE.search(street)
+    if m and not (a.get("postal") or "").strip():
+        a["postal"] = m.group(1)
+        street = (street[:m.start()] + street[m.end():]).strip()
+        how.append(f"took ZIP {m.group(1)} out of the street box")
+    lines = street.split("\n")
+    m = PO_RE.search(lines[0])
+    if m:
+        extra = (lines[0][:m.start()] + " " + lines[0][m.end():]).strip(" ,-")
+        lines[0] = f"P.O. Box {m.group(1)}"
+        if extra:
+            how.append(f"street as {lines[0]} (left out “{extra}”: check it)")
+            sure = False
+        street = "\n".join(lines)
+    a["street"] = street
+    return a, how, sure, bool(m)
+
+
 def fix(a, lookup=True, zip_city=None):
     """(fixed address, how, confident) — how: list of what was done."""
+    a, how, confident, po_box = _street_extras(a)
     before = dict(a)
     a = offline_fix(a)
-    how = []
     if (a.get("street") or "") != (before.get("street") or "") and any(
             (a.get(k) or "") != (before.get(k) or "") for k in ("city", "region", "postal")):
         how.append("split the address out of the street box")
     if (a.get("region") or "") != (before.get("region") or "") and "split the address out of the street box" not in how:
         how.append("state from ZIP" if not before.get("region") else "state as 2 letters")
-    confident = True
+    if po_box:
+        # the Census Bureau can't look up P.O. boxes: the city comes from your other contacts with that ZIP
+        z = (a.get("postal") or "")[:5]
+        if not (a.get("city") or "").strip() and (zip_city or {}).get(z):
+            a["city"] = zip_city[z]
+            how.append(f"city from your other contacts with ZIP {z} (P.O. boxes can't be looked up: check it)")
+            confident = False
+        lookup = False
     # "2932 Example Ave / Springfield" with no state or ZIP: the last plain-words line is likely the city
     lines = [ln.strip() for ln in (a.get("street") or "").split("\n") if ln.strip()]
     if not (a.get("city") or "").strip() and len(lines) >= 2 and re.fullmatch(r"[A-Za-z][A-Za-z .'-]{1,29}", lines[-1]) \

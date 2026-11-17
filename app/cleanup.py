@@ -285,9 +285,9 @@ def build_plan(progress=None):
                     g["addr"] = a                                    # show Work/Home over Other
                 if all(m is not c for m in g["members"]):      # a contact listing it twice counts once
                     g["members"].append(c)
+        rows = {}          # fixed address -> one row, even when the copies typed it differently
         for skey, g in seen_addr.items():
             a = g["addr"]
-            typ = a.get("type")
             after, how, confident = addr.fix(a, lookup=lookup, zip_city=zip_city)
             changed = any((after.get(x) or "") != (a.get(x) or "") for x in ("street", "city", "region", "postal", "country"))
             missing = [x for x in ("street", "city", "region", "postal") if not (after.get(x) or "").strip()]
@@ -297,8 +297,26 @@ def build_plan(progress=None):
             if missing:
                 detail += ("; " if detail else "") + "still missing " + ", ".join(
                     {"street": "street", "city": "city", "region": "state", "postal": "ZIP"}[x] for x in missing)
-            add("address", p["name"] or "(no name)", detail, g["members"], bool(changed and confident),
-                addr_type=typ, street_key=skey, before=a, after=after)
+            fixed = (_street_key(after), (after.get("city") or "").strip().lower(), (after.get("postal") or "")[:5])
+            row = rows.get(fixed) if fixed[0] and not missing else None
+            if row is None:
+                rows[fixed if fixed[0] and not missing else ("", skey)] = {
+                    "a": a, "after": after, "detail": detail, "members": list(g["members"]),
+                    "ok": bool(changed and confident), "keys": [skey], "also": []}
+                continue
+            row["keys"].append(skey)
+            row["also"].append(model.addr_line(a))
+            row["ok"] = row["ok"] and bool(changed and confident)
+            row["members"] += [m for m in g["members"] if all(m is not x for x in row["members"])]
+            if (row["a"].get("type") or "other") == "other" and (a.get("type") or "other") != "other":
+                row["a"] = a
+        for row in rows.values():
+            a, detail = row["a"], row["detail"]
+            if row["also"]:
+                detail += ("; " if detail else "") + "also written as: " + " | ".join(row["also"])
+            add("address", p["name"] or "(no name)", detail, row["members"], row["ok"],
+                addr_type=a.get("type"), street_key=row["keys"][0], street_keys=row["keys"],
+                before=a, after=row["after"])
 
     # labels
     groups = {name: rn for rn, name in names.items()}
@@ -515,15 +533,18 @@ def _do_address(item, region, _names):
             continue
         rec = model.editable(c)
         same_type = [a for a in rec["addr"] if a.get("type") == item["addr_type"]]
-        want = _street_key({"street": item["street_key"]})          # older plans stored the plainer key
-        targets = [a for a in rec["addr"] if _street_key(a) == want]
+        # every way this place was typed (older plans stored one plainer key)
+        want = {_street_key({"street": k}) for k in item.get("street_keys") or [item["street_key"]]}
+        targets = [a for a in rec["addr"] if _street_key(a) in want]
         if not targets and len(same_type) == 1:
             targets = same_type
-        targets = [a for a in targets if not all((a.get(k) or "").strip() == new[k] for k in new)]
         if not targets:
             continue
-        for target in targets:
-            target.update(new)
+        keep, extra = targets[0], targets[1:]          # once fixed they'd be the same address: keep one
+        if not extra and all((keep.get(k) or "").strip() == new[k] for k in new):
+            continue
+        keep.update(new)
+        rec["addr"] = [a for a in rec["addr"] if all(a is not x for x in extra)]
         writer.update([m], rec, action="cleanup", note="cleanup: address fixed")
         done.append(LABEL[m["side"]])
     return f"address updated in {' and '.join(done)}" if done else ""

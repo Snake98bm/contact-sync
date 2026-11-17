@@ -190,6 +190,21 @@ def test_repeated_address_removed():
     assert len(rec["addr"]) == 2
 
 
+def test_po_box_with_zip_in_street_box():
+    def never(method, url, **kw):
+        raise AssertionError("P.O. boxes are not looked up")
+    real, net.request = net.request, never
+    try:
+        a, how, ok = addr.fix(A("Billing P.O. Box 77 zip 90008"),
+                              zip_city=addr.zip_cities([A("x", "Springfield", "CA", "90008")]))
+    finally:
+        net.request = real
+    assert (a["street"], a["city"], a["region"], a["postal"]) == ("P.O. Box 77", "Springfield", "CA", "90008"), a
+    assert not ok and any("Billing" in h for h in how) and any("ZIP 90008" in h for h in how), how
+    a, how, ok = addr.fix(A("PO Box 5", "Springfield", "CA", "90008"), lookup=False)
+    assert a["street"] == "P.O. Box 5"
+
+
 def test_street_differs():
     assert addr.street_differs("Suite D 120 S. Example Oak", "120 N Example Oaks Dr")
     assert addr.street_differs("120 S Example Oaks Dr", "120 N Example Oaks Dr")

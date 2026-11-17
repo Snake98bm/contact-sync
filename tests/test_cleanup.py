@@ -280,6 +280,25 @@ def test_cleanup():
     assert not writer.busy["cleanup"]
 
 
+def test_address_typed_two_ways_is_one_row():
+    mode("on")
+    ms("AAM-twin", "Twin", "Example", "twin@example.com",
+       homeAddress={"street": "7 Sample", "city": "Springfield", "state": "CA"},
+       otherAddress={"street": "7 Sample Rd.", "city": "Springfield", "state": "CA"})
+    real = addr.census
+    addr.census = lambda a, **kw: {"city": "Springfield", "region": "CA", "postal": "90007", "street": "7 Sample Rd",
+                                   "matched": "7 SAMPLE RD, SPRINGFIELD, CA, 90007"}
+    try:
+        rows = [i for i in cleanup.build_plan()["items"] if i["kind"] == "address" and i["title"] == "Twin Example"]
+    finally:
+        addr.census = real
+    assert len(rows) == 1 and len(rows[0]["street_keys"]) == 2 and "also written as" in rows[0]["detail"], rows
+    assert rows[0]["addr_type"] == "home" and rows[0]["after"]["postal"] == "90007"
+    cleanup._do_address(rows[0], "US", {})
+    assert MS["AAM-twin"]["homeAddress"]["street"] == "7 Sample Rd" and MS["AAM-twin"]["homeAddress"]["postalCode"] == "90007"
+    assert not (MS["AAM-twin"].get("otherAddress") or {}).get("street"), MS["AAM-twin"]       # one copy kept
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
