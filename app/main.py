@@ -260,7 +260,9 @@ class Handler(BaseHTTPRequestHandler):
                                                     write_mode=writer.mode()))
         if path == "/cleanup":
             return self._send(200, web.cleanup_page(cleanup.latest_plan(), cleanup.state, writer.mode(),
-                                                    qs.get("msg", [""])[0][:300], qs.get("error", [""])[0][:300]))
+                                                    qs.get("msg", [""])[0][:300], qs.get("error", [""])[0][:300],
+                                                    people={(c["side"], c["id"]): p for p in (runner.report or {}).get("people", [])
+                                                            for c in p["members"]}))
         if path == "/api/cleanup":
             plan = cleanup.latest_plan()
             return self._json({"state": cleanup.state, "plan": plan})

@@ -35,7 +35,7 @@ tr:last-child td{border-bottom:0}td.num{font-variant-numeric:tabular-nums;white-
 .pill{display:inline-block;padding:1px 9px;border-radius:99px;font-size:12.5px;font-weight:600;white-space:nowrap}
 .p-ok{color:var(--ok);background:var(--okbg)}.p-warn{color:var(--warn);background:var(--warnbg)}
 .p-bad{color:var(--bad);background:var(--badbg)}.p-info{color:var(--info);background:var(--infobg)}
-.p-mute{color:var(--mute);background:var(--mutebg)}tr.person>td{border-bottom:none;padding-bottom:0}tr.sub>td:nth-child(2){padding-left:22px}.rm{display:flex;flex-wrap:wrap;gap:4px 16px;margin-top:6px}.rm label{display:inline-flex;align-items:center;gap:4px;margin:0;font-weight:normal}tr:has(.rm input:not([value=fix]):checked) textarea,tr:has(.rm input:not([value=fix]):checked) .bar input{text-decoration:line-through;opacity:.5}tr:has(.rm input[value=delete_contact]:checked)>td{background:var(--badbg)}tr.review>td{background:var(--warnbg)}tr.review:has(input.k-address:checked)>td{background:none}tr.review:has(input.k-address:checked) .p-warn{color:var(--ok);background:var(--okbg)}tr.review:has(input.k-address:checked) .rv:after{content:"ed"}.muted{color:var(--muted)}.small{font-size:13px}
+.p-mute{color:var(--mute);background:var(--mutebg)}tr.person>td{border-bottom:none;padding-bottom:0}tr.sub>td:nth-child(2){padding-left:22px}.rm{display:flex;flex-wrap:wrap;gap:4px 16px;margin-top:6px}.rm label{display:inline-flex;align-items:center;gap:4px;margin:0;font-weight:normal}tr:has(.rm input:not([value=fix]):checked) textarea,tr:has(.rm input:not([value=fix]):checked) .bar input{text-decoration:line-through;opacity:.5}tr:has(.rm input[value=delete_contact]:checked)>td{background:var(--badbg)}tr.review>td{background:var(--warnbg)}tr.review:has(input.k-address:checked) .p-warn{color:var(--ok);background:var(--okbg)}tr.review:has(input.k-address:checked) .rv:after{content:"ed"}.muted{color:var(--muted)}.small{font-size:13px}
 button,.btn{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:8px 14px;font:inherit;
 font-weight:600;cursor:pointer;text-decoration:none;display:inline-block}
 @media (prefers-color-scheme:dark){button,.btn{color:#0f1218}}
@@ -1080,6 +1080,35 @@ f.addEventListener('change',save);f.addEventListener('input',save);
 REVIEW_PILL = ' <span class="pill p-warn rv">Review</span>'    # reads "Reviewed" once ticked (CSS)
 
 
+def _card(i, people):
+    """'Show card': everything each copy of this person holds (from the latest copy of both accounts),
+    plus a link to their Contacts page. people: {(side, id): person from the report}."""
+    p = next((people[(m["side"], m["id"])] for m in (i.get("person") or []) + (i.get("members") or [])
+              if (m["side"], m["id"]) in people), None)
+    if not p:
+        return ""
+    cols = []
+    for c in sorted(p["members"], key=lambda c: c["side"] != "microsoft"):
+        rows = [("Name", c.get("name")), ("Company", " · ".join(x for x in (c.get("company"), c.get("title")) if x))]
+        val = lambda x: x if isinstance(x, str) else f"{x.get('value', '')} ({x.get('type') or ''})"
+        rows += [("Phone", val(x)) for x in c.get("phones") or []]
+        rows += [("Email", val(e)) for e in c.get("emails") or []]
+        rows += [(f"Address ({(a.get('type') or '').title()})",
+                  ", ".join(x for x in ((a.get("street") or "").replace("\n", " / "), a.get("city"), a.get("region"),
+                                        a.get("postal"), a.get("country")) if x) or "(empty)")
+                 for a in c.get("addr") or []]
+        rows += [("Birthday", c.get("birthday")), ("Labels", ", ".join(c.get("groups") or [])),
+                 ("Notes", (c.get("notes") or "")[:300] + ("…" if len(c.get("notes") or "") > 300 else ""))]
+        cols.append(f"<div style='flex:1;min-width:220px'>{pill(*SIDE[c['side']])}<table class='small'>"
+                    + "".join(f"<tr><td class='muted' style='padding-right:8px'>{esc(k)}</td>"
+                              f"<td style='white-space:pre-wrap'>{esc(v)}</td></tr>" for k, v in rows if k and v)
+                    + "</table></div>")
+    return (f"<details class='small card-more'><summary>Show card</summary><div class='bar' style='align-items:"
+            f"flex-start;gap:16px;margin:6px 0'>{''.join(cols)}</div><a href='/contacts/{p['key']}' target='_blank'>"
+            "Open on the Contacts page ↗</a> <span class='muted'>(from the latest copy of both accounts)</span>"
+            "</details>")
+
+
 def _is_review(i):
     """A fix was found but it isn't sure (ZIP correction, street suggestion, guess): shown yellow."""
     a, b = i.get("after") or {}, i.get("before") or {}
@@ -1087,27 +1116,27 @@ def _is_review(i):
                                     for k in ("street", "city", "region", "postal", "country"))
 
 
-def _address_rows(items):
+def _address_rows(items, people=None):
     """Each address: before, and editable boxes holding the proposed fix. One person's addresses sit together
     under one heading."""
     import itertools
     rows = []
-    people = [list(g) for _, g in itertools.groupby(items, key=lambda i: i["title"])]
+    persons = [list(g) for _, g in itertools.groupby(items, key=lambda i: i["title"])]
     # yellow (fix to check) first, then the confident ones, then those nothing could be worked out for
-    people.sort(key=lambda g: 0 if any(_is_review(i) for i in g) else 1 if any(i["default"] for i in g) else 2)
-    for grp in people:
+    persons.sort(key=lambda g: 0 if any(_is_review(i) for i in g) else 1 if any(i["default"] for i in g) else 2)
+    for grp in persons:
         title = grp[0]["title"]
         if len(grp) > 1:
             sides = {m["side"] for i in grp for m in i["members"]}
             rows.append(f"<tr class='person'><td></td><td colspan='2'><b>{esc(title)}</b> "
                         + " ".join(pill(*SIDE[s]) for s in ("microsoft", "google") if s in sides)
-                        + f" <span class='muted small'>· {len(grp)} addresses to check</span></td></tr>")
-        rows += [_address_row(i, show_name=len(grp) == 1) for i in grp]
+                        + f" <span class='muted small'>· {len(grp)} addresses to check</span>" + _card(grp[0], people or {}) + "</td></tr>")
+        rows += [_address_row(i, show_name=len(grp) == 1, people=people) for i in grp]
     return ("<div class='card'><table><tr><th></th><th>Address (editable)</th><th>What was done</th></tr>"
             + "".join(rows) + "</table></div>")
 
 
-def _address_row(i, show_name=True):
+def _address_row(i, show_name=True, people=None):
     n, a, b = i["id"], i.get("after") or {}, i.get("before") or {}
     before = ", ".join(x for x in ((b.get("street") or "").replace("\n", " / "), b.get("city"), b.get("region"),
                                    b.get("postal"), b.get("country")) if x)
@@ -1124,6 +1153,7 @@ def _address_row(i, show_name=True):
         f"value='{n}' id='a{n}' class='k-address'{' checked' if i['default'] else ''}></td><td>{head}"
         f"{REVIEW_PILL if review else ''}"
         f"<div class='muted small'>{typ + ' · ' if show_name else ''}was: {esc(before) or '(empty)'}</div>"
+        f"{_card(i, people or {}) if show_name else ''}"
         f"<textarea name='addr_{n}_street' rows='{max(1, (a.get('street') or '').count(chr(10)) + 1)}' "
         f"style='width:100%;max-width:420px;margin-top:4px' onchange=\"{tick}\">"
         f"{esc(a.get('street', ''))}</textarea><div class='bar'>{box('city', 'City', 140)}{box('region', 'State', 60)}"
@@ -1137,18 +1167,19 @@ def _address_row(i, show_name=True):
         f"<td class='small'>{esc(i['detail'])}</td></tr>")
 
 
-def _shared_cards(items):
+def _shared_cards(items, people=None):
     """One card per shared phone/email: keep / remove from ticked people / combine."""
     out = []
     for i in items:
         n = i["id"]
         what = "number" if i.get("kind_of") == "phone" else "email"
-        people = ""
+        plist = ""
         for k, p in enumerate(i.get("people") or []):
             sides = " ".join(pill(*SIDE[m["side"]]) for m in p["members"])
-            people += (f"<label class='check' style='font-weight:500'><input type='checkbox' name='strip_{n}' "
+            plist += (f"<label class='check' style='font-weight:500'><input type='checkbox' name='strip_{n}' "
                        f"value='{k}' onchange=\"if(this.checked)document.getElementById('s{n}strip').checked=true\">"
-                       f"Remove {esc(i.get('shown'))} from <b>{esc(p['name'])}</b> {sides}</label>")
+                       f"Remove {esc(i.get('shown'))} from <b>{esc(p['name'])}</b> {sides}</label>"
+                      + _card({"members": p["members"]}, people or {}))
         out.append(
             f"<div class='card pad' style='margin-bottom:10px'><b>{esc(i.get('shown'))}</b> "
             f"<span class='muted'>on {esc(i['title'])}</span>"
@@ -1161,11 +1192,11 @@ def _shared_cards(items):
             f"<label class='check' style='margin:0'><input type='radio' name='shared_{n}' value='strip' id='s{n}strip'> "
             f"Remove the {what} from the people ticked below</label>"
             f"<label class='check' style='margin:0'><input type='radio' name='shared_{n}' value='combine'> "
-            f"Combine them into one contact</label></div>{people}{_name_editor(i)}</div>")
+            f"Combine them into one contact</label></div>{plist}{_name_editor(i)}</div>")
     return "".join(out)
 
 
-def cleanup_page(plan, st, write_mode, msg="", error=""):
+def cleanup_page(plan, st, write_mode, msg="", error="", people=None):
     b = ["<h1>Cleanup</h1>"]
     if write_mode != "on" and not st["running"]:
         b.append('<div class="banner err"><b>Nothing on this page can be applied until write mode is On.</b> '
@@ -1226,11 +1257,11 @@ def cleanup_page(plan, st, write_mode, msg="", error=""):
                      f"<p class='muted small'>{intro} <a href='#' onclick=\"document.querySelectorAll('.k-address')"
                      f".forEach(x=>x.checked=true);return false\">tick all</a> · <a href='#' onclick=\"document"
                      f".querySelectorAll('.k-address').forEach(x=>x.checked=false);return false\">untick all</a></p>")
-            b.append(_address_rows(items))
+            b.append(_address_rows(items, people))
             continue
         if kind == "shared":
             b.append(f"<h2>{esc(title)} <span class='muted'>({len(items)})</span></h2><p class='muted small'>{intro}</p>")
-            b.append(_shared_cards(items))
+            b.append(_shared_cards(items, people))
             continue
         on = sum(1 for i in items if i["default"])
         rows = []
@@ -1242,7 +1273,7 @@ def cleanup_page(plan, st, write_mode, msg="", error=""):
             rows.append(f"<tr><td><input type='checkbox' name='item' value='{i['id']}' class='k-{kind}'"
                         f"{' checked' if i['default'] else ''}></td><td>{esc(i['title'])}"
                         + (f"<div class='muted small'>{esc(names)}</div>" if names and names != i['title'] else "")
-                        + (_name_editor(i) if kind == "combine" else "")
+                        + (_name_editor(i) if kind == "combine" else "") + _card(i, people or {})
                         + f"</td><td>{who}</td><td class='small'>{esc(i['detail'])}{look}</td></tr>")
         b.append(f"<h2>{esc(title)} <span class='muted'>({on} of {len(items)} ticked)</span></h2>"
                  f"<p class='muted small'>{intro} <a href='#' onclick=\"document.querySelectorAll('.k-{kind}')"

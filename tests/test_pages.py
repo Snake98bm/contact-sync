@@ -145,6 +145,25 @@ def test_photos_in_backups():
     assert backup.latest_photo("microsoft", "AAM2") is None
 
 
+def test_cleanup_rows_show_the_card():
+    c1 = {"side": "microsoft", "id": "m1", "name": "Jane Example", "company": "", "title": "", "phones": ["(555) 555-0100"],
+          "emails": ["j@example.com"], "addr": [{"type": "work", "street": "", "city": "Springfeld"}], "birthday": "",
+          "groups": [], "notes": "a note"}
+    p = {"key": "abcdef012345", "members": [c1, dict(c1, side="google", id="g1", addr=[])], "name": "Jane Example"}
+    people = {("microsoft", "m1"): p, ("google", "g1"): p}
+    mem = [{"side": "microsoft", "id": "m1", "name": "Jane Example"}]
+    i = {"id": 1, "kind": "address", "default": False, "title": "Jane Example", "detail": "x", "members": mem,
+         "addr_type": "work", "before": {"city": "Springfeld"}, "after": {"city": "Springfeld"}}
+    plan = {"plan_id": 1, "created": 0, "applied": None, "result": None, "counts": {},
+            "items": [i, dict(i, id=2, kind="tidy"),
+                      dict(i, id=3, kind="shared", kind_of="phone", shown="(555) 555-0100",
+                           people=[{"name": "Jane Example", "members": mem}])]}
+    st = {"running": False, "building": False, "done": 0, "total": 0, "log": [], "step": ""}
+    h = web.cleanup_page(plan, st, "on", people=people)
+    assert h.count("Show card") == 3 and h.count("/contacts/abcdef012345") == 3, h.count("Show card")
+    assert "Address (Work)" in h and "Springfeld" in h and "a note" in h
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
