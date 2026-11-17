@@ -3,6 +3,7 @@ would do: formatting fixes, duplicates, possible matches, junk and leftovers fro
 tool. Nothing here changes any account."""
 import collections
 import difflib
+import hashlib
 import html
 import re
 
@@ -176,7 +177,8 @@ def analyse(contacts, region="US"):
         cs = [by_id[n] for n in members]
         ms = [c for c in cs if c["side"] == "microsoft"]
         gg = [c for c in cs if c["side"] == "google"]
-        people.append({"members": cs, "ms": len(ms), "google": len(gg),
+        key = hashlib.sha1("|".join(sorted(f"{c['side']}:{c['id']}" for c in cs)).encode()).hexdigest()[:12]
+        people.append({"key": key, "members": cs, "ms": len(ms), "google": len(gg),
                        "name": max((fix_name(c["name"]) for c in cs), key=len, default="")})
 
     # possible matches: someone missing on one side who has the same name as someone else
@@ -269,6 +271,7 @@ def analyse(contacts, region="US"):
             "shared_info": len(shared_info),
         },
         "import_blocks": import_blocks, "name_order": name_order, "shared_info": shared_info,
+        "people": sorted(people, key=lambda p: (p["name"] or "~").lower()),
         "duplicates": sorted((p for p in people if p["ms"] > 1 or p["google"] > 1),
                              key=lambda p: -(p["ms"] + p["google"])),
         "only_ms": [p for p in people if p["google"] == 0],

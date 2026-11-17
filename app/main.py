@@ -209,6 +209,20 @@ class Handler(BaseHTTPRequestHandler):
                                                  runner.report, last, next_backup_text(), bool(auth.API_KEY)))
         if path == "/report":
             return self._send(200, web.report_page(runner.report))
+        if path == "/contacts":
+            return self._send(200, web.contacts_page(runner.report, qs.get("q", [""])[0].strip()[:100],
+                                                     qs.get("show", [""])[0]))
+        m = re.fullmatch(r"/contacts/([0-9a-f]{12})", path)
+        if m:
+            p = next((x for x in (runner.report or {}).get("people", []) if x["key"] == m.group(1)), None)
+            if not p:
+                return self._send(404, web.page("Not found", "/contacts", "<h1>Not found</h1><p>That contact isn't in "
+                                                "the latest backup. <a href='/contacts'>Back to Contacts</a></p>"))
+            return self._send(200, web.contact_page(p, runner.report))
+        if path == "/api/contacts":
+            q = qs.get("q", [""])[0].strip()
+            people = [x for x in (runner.report or {}).get("people", []) if web._match(x, q)]
+            return self._json({"count": len(people), "people": people[:200]})
         if path == "/backups":
             return self._send(200, web.backups_page(backup.listing()))
         m = re.fullmatch(r"/backups/([^/]+)/([^/]+)", path)

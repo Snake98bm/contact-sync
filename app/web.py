@@ -69,7 +69,8 @@ def pill(text, cls):
 
 
 def page(title, active, body, refresh=False, nav_on=True):
-    links = [("/", "Dashboard"), ("/report", "Cleanup report"), ("/backups", "Backups"), ("/settings", "Settings")]
+    links = [("/", "Dashboard"), ("/contacts", "Contacts"), ("/report", "Cleanup report"), ("/backups", "Backups"),
+             ("/settings", "Settings")]
     nav = ""
     if nav_on:
         nav = "".join(f'<a href="{h}" class="{"on" if h == active else ""}">{t}</a>' for h, t in links)
@@ -491,3 +492,108 @@ document.getElementById('addpk').onclick=async()=>{{if(!supported())return;say('
 try{{await addPasskey('',document.getElementById('pkname').value);location.href='/settings?saved=1'}}
 catch(e){{say(nice(e),true)}}}};</script>"""
     return page("Settings", "/settings", body)
+
+
+# ---------- contacts ----------
+
+def _status(p):
+    out = []
+    if p["ms"] and p["google"]:
+        out.append(pill("Both", "ok"))
+    elif p["ms"]:
+        out.append(pill("Microsoft only", "warn"))
+    else:
+        out.append(pill("Google only", "warn"))
+    if p["ms"] > 1 or p["google"] > 1:
+        out.append(pill("Duplicate", "bad"))
+    return " ".join(out)
+
+
+def _match(p, q):
+    if not q:
+        return True
+    hay = " ".join([p["name"] or ""] + [" ".join([c["company"], " ".join(c["emails"]),
+                                                  " ".join(x["value"] for x in c["phones"])]) for c in p["members"]])
+    digits = "".join(ch for ch in q if ch.isdigit())
+    if len(digits) >= 4 and digits in "".join(ch for ch in hay if ch.isdigit() or ch == " ").replace(" ", ""):
+        return True
+    return all(w in hay.lower() for w in q.lower().split())
+
+
+def contacts_page(r, q="", show=""):
+    if not r or "people" not in r:
+        return page("Contacts", "/contacts", "<h1>Contacts</h1><p class='muted'>No backup with contact data yet. "
+                    "Run <b>Back up and build report now</b> on the dashboard.</p>")
+    people = [p for p in r["people"] if _match(p, q)]
+    if show == "one":
+        people = [p for p in people if not (p["ms"] and p["google"])]
+    elif show == "dup":
+        people = [p for p in people if p["ms"] > 1 or p["google"] > 1]
+    rows = []
+    for p in people[:1000]:
+        c0 = p["members"][0]
+        emails = sorted({e.lower() for c in p["members"] for e in c["emails"]})
+        phones = []
+        for c in p["members"]:
+            for x in c["phones"]:
+                if x["value"] not in phones:
+                    phones.append(x["value"])
+        rows.append(f"<tr><td><a href='/contacts/{esc(p['key'])}'>{esc(p['name'] or '(no name)')}</a>"
+                    f"<div class='muted small'>{esc(c0['company'])}</div></td>"
+                    f"<td class='small'>{'<br>'.join(esc(e) for e in emails[:2])}</td>"
+                    f"<td class='small num'>{'<br>'.join(esc(x) for x in phones[:2])}</td><td>{_status(p)}</td></tr>")
+    sel = lambda v: " selected" if show == v else ""
+    body = f"""<h1>Contacts</h1>
+<p class="sub">From the backup of {when(r.get('created'))}. Viewing only for now: editing, deleting and restoring
+come with the write phase.</p>
+<form method="get" action="/contacts" class="bar"><input type="text" name="q" value="{esc(q)}" class="wide"
+style="max-width:360px" placeholder="Search name, company, email or phone" autofocus>
+<select name="show" style="padding:7px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--text)">
+<option value="">Everyone</option><option value="one"{sel('one')}>Only on one side</option>
+<option value="dup"{sel('dup')}>Duplicates</option></select><button>Search</button></form>
+<p class="muted small">{len(people)} of {len(r['people'])} people</p>
+<div class="card"><table><tr><th>Name</th><th>Email</th><th>Phone</th><th>In</th></tr>{''.join(rows)}</table></div>"""
+    return page("Contacts", "/contacts", body)
+
+
+FIELDS = [("Name", lambda c: c["name"]), ("Shown as", lambda c: c.get("shown_as", "")),
+          ("First / last", lambda c: " / ".join(x for x in (c["given"], c["family"]) if x)),
+          ("Company", lambda c: c["company"]), ("Job title", lambda c: c["title"]),
+          ("Emails", lambda c: "\n".join(c["emails"])),
+          ("Phones", lambda c: "\n".join(f"{x['value']}  ({x['type']})" for x in c["phones"])),
+          ("Addresses", lambda c: "\n".join(c["addresses"])), ("Birthday", lambda c: c["birthday"]),
+          ("Groups", lambda c: ", ".join(c["groups"])), ("Notes", lambda c: c["notes"]),
+          ("Last changed", lambda c: (c.get("updated") or "")[:16].replace("T", " "))]
+
+
+def contact_page(p, r):
+    cols = p["members"]
+    head = "".join(f"<th>{pill(*SIDE[c['side']])}</th>" for c in cols)
+    rows = []
+    for label, get in FIELDS:
+        vals = [get(c) or "" for c in cols]
+        if not any(vals):
+            continue
+        norm = {" ".join(v.lower().split()) for v in vals}
+        differ = len(cols) > 1 and len(norm) > 1
+        tds = "".join(f"<td style='white-space:pre-wrap'{' class=\"diff\"' if differ else ''}>{esc(v)}</td>" for v in vals)
+        rows.append(f"<tr><th style='text-transform:none;font-size:13px'>{esc(label)}</th>{tds}</tr>")
+    notes = []
+    keys = {(c["side"], c["id"]) for c in cols}
+    for sec, title in (("import_blocks", "Has a “Contact Imported” block in its notes (removed by the cleanup)"),
+                       ("name_order", "Name stored as “Last, First” (fixed by the cleanup)")):
+        if any((i["contact"]["side"], i["contact"]["id"]) in keys for i in r.get(sec, [])):
+            notes.append(f"<li>{title}</li>")
+    for s in r.get("shared_info", []):
+        if any((c["side"], c["id"]) in keys for c in s["contacts"]):
+            others = [c["name"] for c in s["contacts"] if (c["side"], c["id"]) not in keys]
+            notes.append(f"<li>Shares {esc(s['kind'])} {esc(s['value'])} with {esc(', '.join(sorted(set(others))))} "
+                         "(not merged)</li>")
+    body = f"""<p><a href="/contacts">← Contacts</a></p><h1>{esc(p['name'] or '(no name)')}</h1>
+<p class="sub">{_status(p)}</p>
+{'<div class="banner warnb"><ul style="margin:0;padding-left:18px">' + ''.join(notes) + '</ul></div>' if notes else ''}
+<div class="card"><table><tr><th></th>{head}</tr>{''.join(rows)}</table></div>
+<p class="muted small">Fields that differ between the copies are highlighted. Edit, delete and restore arrive with the
+write phase.</p>
+<style>td.diff{{background:var(--warnbg)}}</style>"""
+    return page(p["name"] or "Contact", "/contacts", body)

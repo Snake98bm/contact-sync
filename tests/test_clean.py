@@ -124,6 +124,13 @@ def test_analyse():
     assert r["sync_tool"]["lines"][0] == ("Synced by SyncGene # id #", 2), r["sync_tool"]["lines"]
     assert k["name_fixes"] == 1 and k["email_fixes"] == 1
     assert k["paired"] == 3, k                      # Pat and the two Mikes
+    assert len(r["people"]) == k["people"] and len({p["key"] for p in r["people"]}) == k["people"]
+    import web
+    assert "Jane Example" in web.contacts_page(r, "jane")
+    assert "Jane Example" not in web.contacts_page(r, "mike")
+    assert "555-555-0111" in web.contacts_page(r, "5555550111")             # digits-only phone search
+    jane = next(p for p in r["people"] if p["name"] == "Jane Example")
+    assert 'class="diff"' in web.contact_page(jane, r)                      # name differs: JANE EXAMPLE
     assert any(f["new"] == "(555) 555-0100" for f in r["phone_fixes"])
 
 
