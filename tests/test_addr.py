@@ -36,6 +36,9 @@ def test_split_street():
     assert a == A("1 Example St\nSpringfield, CA 90000", city="Shelbyville")   # nothing is dropped
     a = s(A("1 Example St\nSpringfield, CA 90000", city="Springfield"))   # agrees: the duplicate lines go
     assert (a["street"], a["city"], a["region"], a["postal"]) == ("1 Example St", "Springfield", "CA", "90000")
+    a = s(A("716 Example, Springfield Ca"))                  # one comma: street, then "City ST"
+    assert (a["street"], a["city"], a["region"]) == ("716 Example", "Springfield", "CA"), a
+    assert s(A("1 Example St, Suite 5")) == A("1 Example St, Suite 5")   # not a town
     assert s(A("1 Example St")) == A("1 Example St")
 
 

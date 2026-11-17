@@ -92,6 +92,12 @@ def split_street(a):
     lines = [ln.strip() for ln in (a.get("street") or "").replace("\r", "").split("\n") if ln.strip()]
     if len(lines) == 1 and lines[0].count(",") >= 2:
         lines = [x.strip() for x in lines[0].split(",") if x.strip()]
+    elif len(lines) == 1 and lines[0].count(",") == 1:
+        # '716 Example, Springfield Ca': the part after the comma is 'City ST' (or 'City ST ZIP')
+        head, tail = (x.strip() for x in lines[0].split(","))
+        t = _split_tail(tail)
+        if head and t and t[0]:
+            lines = [head, tail]
     if len(lines) < 2:
         return a
     found = {}
