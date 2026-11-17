@@ -195,11 +195,28 @@ def census(a, timeout=20, use_postal=True):
         out = {"city": (c.get("city") or "").title(), "region": c.get("state") or "", "postal": c.get("zip") or "",
                "matched": matched, "street": matched.split(",")[0].strip().title()}
     store.x("INSERT OR REPLACE INTO addr_cache(q, result, ts) VALUES(?,?,?)", (q.lower(), json.dumps(out), time.time()))
-    time.sleep(0.3)
+    time.sleep(0.15)
     return out
 
 
-def fix(a, lookup=True):
+STREET_TYPES = {"ave", "avenue", "st", "street", "dr", "drive", "rd", "road", "ct", "court", "ln", "lane", "way",
+                "blvd", "boulevard", "pl", "place", "cir", "circle", "hwy", "highway", "pkwy", "parkway", "ter",
+                "terrace", "trl", "trail", "loop", "sq", "square"}
+TRY_TYPES = ("Ave", "St", "Dr", "Rd", "Ct", "Ln", "Way")
+
+
+def zip_cities(addresses):
+    """ZIP -> the city most of your contacts with that ZIP have (to fill a missing city for a lookup)."""
+    import collections
+    seen = collections.defaultdict(collections.Counter)
+    for a in addresses:
+        z, c = (a.get("postal") or "")[:5], (a.get("city") or "").strip()
+        if re.fullmatch(r"\d{5}", z) and c:
+            seen[z][c.title()] += 1
+    return {z: cnt.most_common(1)[0][0] for z, cnt in seen.items()}
+
+
+def fix(a, lookup=True, zip_city=None):
     """(fixed address, how, confident) — how: list of what was done."""
     before = dict(a)
     a = offline_fix(a)
@@ -232,14 +249,34 @@ def fix(a, lookup=True):
     lines = [ln.strip() for ln in (a.get("street") or "").split("\n") if ln.strip()]
     if lookup and lines and (a.get("city") or a.get("postal") or a.get("region")):
         core, unit = split_unit(lines[0])
+        # no city but a ZIP: borrow the city your other contacts with that ZIP have (the lookup needs one)
+        city = (a.get("city") or "").strip() or (zip_city or {}).get((a.get("postal") or "")[:5], "")
         got = used = None
+        guessed = False
         try:
             for v in variants(core):
-                q = dict(a, street=v)
+                q = dict(a, street=v, city=city)
                 got = census(q, use_postal=False) or (census(q) if a.get("postal") else None)
                 if got:
                     used = v
                     break
+            if not got and city:
+                # "1946 Example Garden": no street type. Try the common ones; accept only one clear answer.
+                found = {}
+                for v in variants(core):
+                    if v.split()[-1].lower().rstrip(".") in STREET_TYPES:
+                        continue
+                    for t in TRY_TYPES:
+                        g = census(dict(a, street=f"{v} {t}", city=city), use_postal=False)
+                        if g:
+                            found.setdefault(g["matched"], (g, v))
+                        if len(found) > 1:
+                            break
+                    if len(found) > 1:
+                        break
+                if len(found) == 1:
+                    got, used = next(iter(found.values()))
+                    guessed = True
         except Exception as e:
             log.warning("address lookup failed: %s", e)
             got = None
@@ -255,9 +292,10 @@ def fix(a, lookup=True):
                 a["postal"] = got["postal"]
                 how.append(f"ZIP {old_zip} looks wrong: the Census Bureau has {got['postal']} for {got['matched']}")
                 confident = False                        # changes what's there: the owner decides
-            if used != core and got.get("street"):
+            if (used != core or guessed) and got.get("street"):
                 a["street"] = "\n".join([got["street"] + (f" {unit}" if unit else "")] + lines[1:])
-                how.append(f"street put in order as the Census Bureau knows it ({got['street']})")
+                how.append(("street type guessed: the Census Bureau knows it as " if guessed else
+                            "street put in order as the Census Bureau knows it: ") + got["street"])
                 confident = False
         elif needs_lookup(a):
             how.append("no match found: fill in by hand if you like")

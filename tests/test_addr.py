@@ -118,6 +118,37 @@ def test_wrong_zip_and_jumbled_street():
         net.request = real
 
 
+def _census_with(known):
+    """Fake geocoder that only knows the given full addresses (street, city) -> zip."""
+    def fake(method, url, **kw):
+        q = urllib.parse.unquote(url.split("address=")[1].split("&")[0]).lower()
+        hits = [(s, c, z) for (s, c), z in known.items() if q.startswith(f"{s.lower()}, {c.lower()}")]
+        return {"result": {"addressMatches": [{"matchedAddress": f"{s.upper()}, {c.upper()}, CA, {z}",
+                                               "addressComponents": {"city": c.upper(), "state": "CA", "zip": z}}
+                                              for s, c, z in hits]}}
+    return fake
+
+
+def test_street_type_guess_and_city_from_zip():
+    real = net.request
+    try:
+        net.request = _census_with({("1946 Example Garden Ave", "Springfield"): "90003",
+                                    ("120 N Example Oaks Dr", "Springfield"): "90004"})
+        a, how, ok = addr.fix(A("1946 Example Garden", "Springfield", "CA", ""))
+        assert (a["street"], a["postal"]) == ("1946 Example Garden Ave", "90003") and not ok, (a, how)
+        assert any("street type guessed" in h for h in how)
+        # no city, ZIP present: the city comes from other contacts with that ZIP
+        a, how, ok = addr.fix(A("120 N Example Oaks Dr Suite D", "", "CA", "90004"),
+                              zip_city=addr.zip_cities([A("x", "Springfield", "CA", "90004")]))
+        assert (a["street"], a["city"], a["postal"]) == ("120 N Example Oaks Dr Suite D", "Springfield", "90004"), a
+        # two different street types both match: too unsure, nothing guessed
+        net.request = _census_with({("5 Example Ave", "Springfield"): "90005", ("5 Example St", "Springfield"): "90006"})
+        a, how, ok = addr.fix(A("5 Example", "Springfield", "CA", ""))
+        assert a["street"] == "5 Example" and not a["postal"] and not ok
+    finally:
+        net.request = real
+
+
 def test_incomplete_is_not_ticked():
     a, how, ok = addr.fix(A("1 Example St", "Springfield", "", ""), lookup=False)
     assert not ok

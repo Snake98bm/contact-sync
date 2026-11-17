@@ -269,6 +269,7 @@ def build_plan(progress=None):
     # addresses: one item per person per address (both copies, when they hold the same address)
     lookup = bool(store.load_settings().get("address_lookup", True))
     n_people = len(rep["people"])
+    zip_city = addr.zip_cities([a for c in contacts for a in c.get("addr") or []])
     for n_done, p in enumerate(rep["people"], 1):
         if n_done % 10 == 1:
             say(f"Checking addresses ({n_done} of {n_people} people)")
@@ -281,7 +282,7 @@ def build_plan(progress=None):
                     g["members"].append(c)
         for (typ, skey), g in seen_addr.items():
             a = g["addr"]
-            after, how, confident = addr.fix(a, lookup=lookup)
+            after, how, confident = addr.fix(a, lookup=lookup, zip_city=zip_city)
             changed = any((after.get(x) or "") != (a.get(x) or "") for x in ("street", "city", "region", "postal", "country"))
             missing = [x for x in ("street", "city", "region", "postal") if not (after.get(x) or "").strip()]
             if not changed and not missing:
