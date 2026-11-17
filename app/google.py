@@ -181,6 +181,20 @@ def delete_person(resource_name):
     return _send("DELETE", f"{PEOPLE}/{_rn(resource_name)}:deleteContact")
 
 
+def group_members(group_rn):
+    """resourceNames of the contacts in a label."""
+    if not re.fullmatch(r"contactGroups/[A-Za-z0-9_-]+", group_rn or ""):
+        raise ValueError(f"not a label id: {group_rn!r}")
+    return get(f"{PEOPLE}/{group_rn}?maxMembers=10000").get("memberResourceNames", [])
+
+
+def delete_group(group_rn):
+    """Delete a label, keeping its contacts (deleteContacts=false)."""
+    if not re.fullmatch(r"contactGroups/[A-Za-z0-9_-]+", group_rn or ""):
+        raise ValueError(f"not a label id: {group_rn!r}")
+    return _send("DELETE", f"{PEOPLE}/{group_rn}?deleteContacts=false")
+
+
 def fetch_all():
     """All saved contacts (not 'Other contacts') plus the contact groups (labels)."""
     people, token = [], None

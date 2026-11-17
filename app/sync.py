@@ -109,8 +109,14 @@ def _id(side, raw):
 
 
 def _new_link(ms_raw, g_raw):
+    """Link two copies (or refresh the link if one of them is linked already)."""
     name = common("microsoft", ms_raw)["name"] or common("google", g_raw)["name"]
-    lid = store.x("INSERT INTO links(ms_id, g_id, name) VALUES(?,?,?)", (ms_raw["id"], g_raw["resourceName"], name))
+    old = store.q("SELECT id FROM links WHERE ms_id=? OR g_id=?", (ms_raw["id"], g_raw["resourceName"]))
+    if old:
+        lid = old[0]["id"]
+        store.x("UPDATE links SET ms_id=?, g_id=?, name=? WHERE id=?", (ms_raw["id"], g_raw["resourceName"], name, lid))
+    else:
+        lid = store.x("INSERT INTO links(ms_id, g_id, name) VALUES(?,?,?)", (ms_raw["id"], g_raw["resourceName"], name))
     _save_link(lid, "microsoft", ms_raw)
     _save_link(lid, "google", g_raw)
     for side, raw in (("microsoft", ms_raw), ("google", g_raw)):
@@ -149,7 +155,7 @@ def really_gone(side, cid, folder_ids):
 def start():
     """Link every one-to-one match and mark everything that exists now as seen, then turn sync on."""
     with _lock:
-        if store.q("SELECT COUNT(*) AS n FROM links")[0]["n"]:
+        if store.q("SELECT COUNT(*) AS n FROM seen")[0]["n"]:
             raise writer.Refused("Sync was already started. Pause and resume it instead.")
         data, _, names = _fetch()
         contacts = [common(s, raw, names) for s in SIDES for raw in data[s].values()]

@@ -20,6 +20,7 @@ import store
 import tls
 import webauthn
 import web
+import cleanup
 import sync
 import writer
 from jobs import Runner
@@ -255,6 +256,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, web.contact_page(p, runner.report, writer.history([c["id"] for c in p["members"]]),
                                                     msg=qs.get("msg", [""])[0][:500], error=qs.get("error", [""])[0][:500],
                                                     write_mode=writer.mode()))
+        if path == "/cleanup":
+            return self._send(200, web.cleanup_page(cleanup.latest_plan(), cleanup.state, writer.mode(),
+                                                    qs.get("msg", [""])[0][:300], qs.get("error", [""])[0][:300]))
+        if path == "/api/cleanup":
+            plan = cleanup.latest_plan()
+            return self._json({"state": cleanup.state, "plan": plan})
         if path == "/sync":
             return self._send(200, web.sync_page(sync.status(), sync.recent_runs(), sync.recent_conflicts(),
                                                  writer.mode(), qs.get("msg", [""])[0][:300], qs.get("error", [""])[0][:300]))
@@ -355,7 +362,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": str(e)}, 400)
         return self._json({"error": "not found"}, 404)
 
-    def _contact_write(self, path, f):
+    def _contact_write(self, path, f, form_all=lambda k: []):
         """Edit / delete / restore from the pages (signed in). Returns None if the path isn't one of these."""
         m = re.fullmatch(r"/contacts/([0-9a-f]{12})/(edit|delete|history/(\d+)/restore)", path)
         if m:
@@ -398,6 +405,23 @@ class Handler(BaseHTTPRequestHandler):
             return self._redirect("/bin?" + urllib.parse.urlencode(
                 {"msg": "Restored to " + " and ".join("Microsoft 365" if s == "microsoft" else "Google" for s in ids)
                  + "." + (" " + " ".join(warns) if warns else "")}))
+        if path in ("/cleanup/plan", "/cleanup/apply"):
+            back = lambda k, v: self._redirect("/cleanup?" + urllib.parse.urlencode({k: v}))
+            try:
+                if path == "/cleanup/plan":
+                    plan = cleanup.build_plan()
+                    return back("msg", f"Plan ready: {len(plan['items'])} items.")
+                ids = [int(x) for x in form_all("item") if x.isdigit()]
+                if not ids:
+                    return back("error", "Nothing was ticked.")
+                if writer.mode() != "on":
+                    return back("error", "Switch Settings → Write mode to “on” first.")
+                if not cleanup.start_apply(int(f("plan_id")), ids, runner):
+                    return back("error", "The cleanup is already running.")
+                return self._redirect("/cleanup")
+            except Exception as e:
+                log.exception("cleanup action failed")
+                return back("error", f"Failed: {e}"[:300])
         if path.startswith("/sync/"):
             back = lambda k, v: self._redirect("/sync?" + urllib.parse.urlencode({k: v}))
             try:
@@ -440,6 +464,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "bad JSON"}, 400)
         try:
             with writer.test_only():
+                if path == "/api/cleanup/plan":     # reads only: builds the plan for the owner to review
+                    plan = cleanup.build_plan()
+                    return self._json({"plan_id": plan["plan_id"], "counts": plan["counts"]})
                 if path == "/api/sync/run":         # inside test_only(): only test contacts are written
                     rid = sync.run("api")
                     run = (store.q("SELECT * FROM sync_runs WHERE id=?", (rid,)) or [None])[0] if rid else None
@@ -568,7 +595,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._redirect("/settings?saved=1")
         if path.startswith("/api/") and path != "/api/run":
             return self._api_write(path, raw)
-        r = self._contact_write(path, f)
+        r = self._contact_write(path, f, lambda k: form.get(k, []))
         if r is not None:
             return r
         if path in ("/run", "/api/run"):
@@ -598,6 +625,7 @@ def main():
     store.init()
     writer.init()
     sync.init()
+    cleanup.init()
     writer.prune()
     store.x("UPDATE runs SET finished=started, error='Interrupted (container restarted)' WHERE finished IS NULL")
     if not os.path.exists(store.SETTINGS_PATH):

@@ -3,7 +3,7 @@
 - Write mode (Settings): "off" = nothing can be written; "test" = only contacts whose name starts
   with "Contact-Sync Test"; "on" = any contact.
 - Before an edit or delete, a fresh copy of each side is read and saved: edits to the contact's
-  history (any version can be put back), deletes to the recycle bin (kept 90 days, restorable to
+  history (any version can be put back), deletes to the recycle bin (kept 2 years, restorable to
   both accounts). Restores write the saved copy back as it was, field for field.
 - Edits are merged into the current data, so fields the edit page doesn't show are kept.
 - A change that fails half-way (one side done, the other not) is recorded, and a retry of a
@@ -24,7 +24,7 @@ import store
 
 log = logging.getLogger("writer")
 TEST_PREFIX = "Contact-Sync Test"
-BIN_DAYS = 90
+BIN_DAYS = 730                  # 2 years
 MODES = ("off", "test", "on")
 SIDE_NAME = {"microsoft": "Microsoft 365", "google": "Google"}
 
@@ -314,6 +314,29 @@ def restore_version(version_id, members):
             warnings += [f"{SIDE_NAME[m['side']]}: {w}" for w in warn]
         _notify(upserted=upserted)
         return warnings
+
+
+def patch_graph(cid, patch, name, note=""):
+    """Change Outlook-only properties (e.g. categories) on one Microsoft contact, keeping a copy first."""
+    with _lock:
+        _check(name)
+        raw = msgraph.get_contact(cid)
+        vid = _version("microsoft", cid, name, "cleanup", before=raw, note=note, batch=uuid.uuid4().hex)
+        with net.writes_allowed():
+            after = msgraph.update_contact(cid, patch)
+        store.x("UPDATE versions SET after=? WHERE id=?", (json.dumps(after), vid))
+    _notify(upserted=[("microsoft", after)])
+    return after
+
+
+def delete_label(group_rn, name):
+    """Delete a Google label; its contacts are kept. Only with write mode "on"."""
+    if mode() != "on":
+        raise Refused("Deleting a label needs write mode “on”.")
+    with _lock:
+        _version("google", group_rn, name, "label delete", note="label deleted; its contacts were kept")
+        with net.writes_allowed():
+            google.delete_group(group_rn)
 
 
 def history(ids):

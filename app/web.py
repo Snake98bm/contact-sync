@@ -70,7 +70,8 @@ def pill(text, cls):
 
 
 def page(title, active, body, refresh=False, nav_on=True):
-    links = [("/", "Dashboard"), ("/contacts", "Contacts"), ("/sync", "Sync"), ("/report", "Cleanup report"),
+    links = [("/", "Dashboard"), ("/contacts", "Contacts"), ("/sync", "Sync"), ("/cleanup", "Cleanup"),
+             ("/report", "Report"),
              ("/bin", "Recycle bin"), ("/backups", "Backups"),
              ("/settings", "Settings")]
     nav = ""
@@ -603,7 +604,7 @@ def contact_page(p, r, history=(), msg="", error="", write_mode="off"):
     key = esc(p["key"])
     dup = p["ms"] > 1 or p["google"] > 1
     confirm_delete = ("return confirm('Delete this contact from both Microsoft 365 and Google? It goes to the "
-                      "recycle bin for 90 days and can be restored.')")
+                      "recycle bin for 2 years and can be restored.')")
     if write_mode != "off" and not dup:
         actions = (f'<div class="bar" style="margin:14px 0"><a class="btn" href="/contacts/{key}/edit">Edit</a>'
                    f'<form method="post" action="/contacts/{key}/delete" class="inline" onsubmit="{confirm_delete}">'
@@ -741,9 +742,9 @@ def bin_page(items, msg="", error="", write_mode="off"):
                    f"<button class='ghost'>Restore to both</button></form>")
         rows.append(f"<tr><td>{esc(it['name'])}</td><td class='num'>{when(it['ts'])}</td><td>{' '.join(sides)}</td>"
                     f"<td>{act}</td></tr>")
-    body = ("<h1>Recycle bin</h1><p class='sub'>Contacts deleted through contact-sync, with both sides' data. Kept 90 "
-            "days. Restoring creates the contact again in Microsoft 365 and Google (photos and group memberships are "
-            "not restored).</p>"
+    body = ("<h1>Recycle bin</h1><p class='sub'>Contacts deleted through contact-sync, with both sides' data. Kept 2 "
+            "years. Restoring creates the contact again in Microsoft 365 and Google (photos are not restored; everything "
+            "else, labels included, comes back as it was).</p>"
             + (f'<div class="banner">{esc(msg)}</div>' if msg else "")
             + (f'<div class="banner err">{esc(error)}</div>' if error else "")
             + _section("items", "Deleted contacts", "", rows, ["Name", "Deleted", "Had copies in", ""]))
@@ -787,7 +788,7 @@ are left alone until the cleanup; contacts you add after today are copied to the
 <ul class="small"><li>A change on one side is copied to the other.</li>
 <li>Changed on both: merged field by field; if the same field changed on both, the newer edit wins and the other
 value is kept in the conflict list below.</li>
-<li>Deleted on one side: deleted on the other too. Both copies go to the recycle bin (90 days) first.</li></ul>
+<li>Deleted on one side: deleted on the other too. Both copies go to the recycle bin (kept 2 years) first.</li></ul>
 <form method="post" action="/sync/start"><button>Start syncing</button></form>""")
         return page("Sync", "/sync", "".join(b))
     last = st["last"]
@@ -834,3 +835,79 @@ value is kept in the conflict list below.</li>
 <div class="hint">A safety stop: a big batch of deletes waits for you to allow it here.</div>
 <p><button>Save</button></p></form>""")
     return page("Sync", "/sync", "".join(b), refresh=False)
+
+
+# ---------- cleanup ----------
+
+KIND_TITLE = {
+    "tidy": ("Tidy up contacts", "Remove “Contact Imported” notes blocks, “Last, First” → “First Last”, phones as "
+             "(559) 555-1234, lowercase emails, fix codes like &amp;amp;."),
+    "combine": ("Combine copies of the same person", "Every email, phone, address and note is kept; one copy per "
+                "account remains and extra copies go to the recycle bin; the two accounts are linked for sync. "
+                "Unticked ones need a look: the names differ."),
+    "shared": ("Different names with the same phone or email", "Usually a household line or a business and its "
+               "staff, so these start unticked. Tick one only if it's really one person: it's then combined like "
+               "the section above."),
+    "copy": ("Copy contacts that are only in one account", "Created in the other account and linked for sync."),
+    "label": ("Remove a Google label", "Only the label goes; its contacts keep everything else."),
+    "category": ("Copy a Google label to Outlook", "Adds an Outlook category to the Outlook copies of its members."),
+}
+
+
+def cleanup_page(plan, st, write_mode, msg="", error=""):
+    b = ["<h1>Cleanup</h1>"]
+    if msg:
+        b.append(f'<div class="banner">{esc(msg)}</div>')
+    if error:
+        b.append(f'<div class="banner err">{esc(error)}</div>')
+    if st["running"]:
+        pct = int(100 * st["done"] / max(st["total"], 1))
+        b.append(f'<div class="banner" id="prog">Working: {st["done"]} of {st["total"]} ({pct}%) — {esc(st["step"])}</div>'
+                 '<ul class="small">' + "".join(f"<li>{esc(x)}</li>" for x in st["log"][-15:]) + "</ul>"
+                 "<script>setTimeout(()=>location.reload(),4000)</script>")
+        return page("Cleanup", "/cleanup", "".join(b))
+    build = ('<form method="post" action="/cleanup/plan" class="inline"><button class="ghost">'
+             + ("Rebuild the plan from the accounts now" if plan else "Build the cleanup plan") + "</button></form>")
+    if not plan:
+        b.append("<p class='sub'>Reads both accounts and lists every change the cleanup would make. Nothing is "
+                 "changed until you tick what you want and press Apply.</p>" + build)
+        return page("Cleanup", "/cleanup", "".join(b))
+    res = plan.get("result")
+    if plan.get("applied") and res:
+        b.append(f"<h2>Applied {when(plan['applied'])}</h2><p>{res['ok']} done, {res['skipped']} skipped, "
+                 f"{res['failed']} failed.</p><details><summary>What happened</summary><ul class='small'>"
+                 + "".join(f"<li>{esc(x)}</li>" for x in res["log"]) + "</ul></details>")
+        b.append(f"<p>{build}</p>")
+        return page("Cleanup", "/cleanup", "".join(b))
+    if write_mode != "on":
+        b.append('<div class="banner warnb">Review the plan now. To apply it, switch Settings → Write mode to '
+                 '“on” first: the cleanup changes real contacts.</div>')
+    b.append(f"<p class='sub'>Plan made {when(plan['created'])} from both accounts. A backup is taken before "
+             f"anything changes, and every change is kept in the contact's history (or the recycle bin), so it can "
+             f"be undone.</p><p>{build}</p>")
+    b.append(f'<form method="post" action="/cleanup/apply" id="cf"><input type="hidden" name="plan_id" '
+             f'value="{plan["plan_id"]}">')
+    for kind in ("tidy", "combine", "shared", "copy", "label", "category"):
+        items = [i for i in plan["items"] if i["kind"] == kind]
+        if not items:
+            continue
+        title, intro = KIND_TITLE[kind]
+        on = sum(1 for i in items if i["default"])
+        rows = []
+        for i in items:
+            who = " ".join(pill(*SIDE[m["side"]]) for m in i["members"][:6]) or ""
+            names = ", ".join(sorted({m["name"] for m in i["members"] if m["name"]}))
+            rows.append(f"<tr><td><input type='checkbox' name='item' value='{i['id']}' class='k-{kind}'"
+                        f"{' checked' if i['default'] else ''}></td><td>{esc(i['title'])}"
+                        + (f"<div class='muted small'>{esc(names)}</div>" if names and names != i['title'] else "")
+                        + f"</td><td>{who}</td><td class='small'>{esc(i['detail'])}</td></tr>")
+        b.append(f"<h2>{esc(title)} <span class='muted'>({on} of {len(items)} ticked)</span></h2>"
+                 f"<p class='muted small'>{intro} <a href='#' onclick=\"document.querySelectorAll('.k-{kind}')"
+                 f".forEach(x=>x.checked=true);return false\">tick all</a> · <a href='#' onclick=\"document"
+                 f".querySelectorAll('.k-{kind}').forEach(x=>x.checked=false);return false\">untick all</a></p>"
+                 "<div class='card'><table><tr><th></th><th>Contact</th><th>In</th><th>What changes</th></tr>"
+                 + "".join(rows) + "</table></div>")
+    dis = "" if write_mode == "on" else " disabled"
+    b.append(f'<p style="margin-top:20px"><button{dis} onclick="return confirm(\'Apply the ticked changes to both '
+             f'accounts? A backup is taken first.\')">Apply the ticked changes</button></p></form>')
+    return page("Cleanup", "/cleanup", "".join(b))
