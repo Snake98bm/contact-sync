@@ -1025,7 +1025,7 @@ KIND_TITLE = {
                "“Combine” merges them into one contact like the section above."),
     "address": ("Fix addresses", "Addresses typed into the street box are split into city, state and ZIP; a "
                 "missing state comes from the ZIP; a missing ZIP, city or state is looked up with the US Census "
-                "Bureau (only the street, city and state are sent). Ticked ones are confident; the boxes are "
+                "Bureau, then OpenStreetMap when the Census has no match (only the street, city and state are sent). Ticked ones are confident; the boxes are "
                 "editable, so you can correct any of them or fill in an unticked one by hand and tick it."),
     "copy": ("Copy contacts that are only in one account", "Created in the other account and linked for sync."),
     "label": ("Remove a Google label", "Only the label goes; its contacts keep everything else."),

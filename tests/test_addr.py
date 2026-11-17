@@ -244,6 +244,33 @@ def test_zip_from_other_contacts_in_a_one_zip_town():
         net.request = real
 
 
+def test_openstreetmap_after_census_miss():
+    seen = []
+
+    def fake(method, url, **kw):
+        seen.append(url)
+        if "census.gov" in url:
+            return {"result": {"addressMatches": []}}
+        q = urllib.parse.parse_qs(url.split("?", 1)[1])
+        assert set(q) >= {"street", "city", "state"} and "Suite" not in q["street"][0] and "Jane" not in url
+        return [{"display_name": "62, Example Drive, Smallton, CA, 90012, United States",
+                 "address": {"house_number": "62", "road": "Example Drive", "town": "Smallton",
+                             "state": "California", "postcode": "90012"}},
+                {"address": {"house_number": "99", "road": "Example Drive", "postcode": "90013"}}]   # other number
+    real, net.request = net.request, fake
+    try:
+        a, how, ok = addr.fix(A("62 Example Drive Suite 4", "Smallton", "CA", ""), osm_lookup=True)
+        assert a["postal"] == "90012" and not ok and any("OpenStreetMap has" in h for h in how), (a, how)
+        assert any("openstreetmap.org" in u for u in seen)
+        n = len(seen)
+        addr.fix(A("62 Example Drive Suite 4", "Smallton", "CA", ""), osm_lookup=True)
+        assert len(seen) == n, "second time comes from the cache"
+        a, how, ok = addr.fix(A("63 Example Drive", "Smallton", "CA", ""))           # setting off: no OSM call
+        assert not any("openstreetmap.org" in u for u in seen[n:]) and not a["postal"]
+    finally:
+        net.request = real
+
+
 def test_street_differs():
     assert addr.street_differs("Suite K 47 S. Example Elm", "47 N Example Elms Dr")
     assert addr.street_differs("47 S Example Elms Dr", "47 N Example Elms Dr")

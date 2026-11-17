@@ -11,6 +11,7 @@ cached in the database so rebuilding the plan doesn't ask again.
 import json
 import logging
 import re
+import threading
 import time
 import urllib.parse
 
@@ -199,6 +200,55 @@ def census(a, timeout=20, use_postal=True):
     return out
 
 
+OSM = "https://nominatim.openstreetmap.org/search"
+_osm_lock = threading.Lock()
+_osm_last = [0.0]
+
+
+def osm(a, timeout=20):
+    """Second try after the Census Bureau has no match: OpenStreetMap's address search (Brad OK 2026-11-17).
+    Sends only the street (first line, without the suite), city and state. Its usage policy allows at most
+    one request a second, so calls are spaced out; answers are cached like the Census ones.
+    Returns {"city","region","postal","matched","street"} or None (only a match with the same house number)."""
+    core, _unit = split_unit((a.get("street") or "").split("\n")[0].strip())
+    num = re.match(r"\d+", core or "")
+    if not num or not (a.get("city") or "").strip():
+        return None
+    params = {"street": core, "city": a["city"].strip(), "state": a.get("region") or "", "country": "us",
+              "format": "jsonv2", "addressdetails": "1", "limit": "2"}
+    key = "osm|" + "|".join(params[k] for k in ("street", "city", "state")).lower()
+    row = (store.q("SELECT result FROM addr_cache WHERE q=?", (key,)) or [None])[0]
+    if row:
+        return json.loads(row["result"])
+    with _osm_lock:                                  # at most one request a second (their rule)
+        wait = _osm_last[0] + 1.1 - time.time()
+        if wait > 0:
+            time.sleep(wait)
+        try:
+            r = net.request("GET", f"{OSM}?{urllib.parse.urlencode(params)}", timeout=timeout)
+        finally:
+            _osm_last[0] = time.time()
+    out = None
+    hits = [h for h in (r if isinstance(r, list) else []) if (h.get("address") or {}).get("house_number") == num.group(0)
+            and (h.get("address") or {}).get("postcode")]
+    if len({h["address"]["postcode"][:5] for h in hits}) == 1:      # one clear ZIP only
+        ad = hits[0]["address"]
+        street = f"{ad['house_number']} {ad.get('road', '')}".strip()
+        town = ad.get("city") or ad.get("town") or ad.get("village") or ad.get("hamlet") or ""
+        out = {"city": town, "region": state_code(ad.get("state") or ""), "postal": ad["postcode"][:5],
+               "matched": hits[0].get("display_name") or street, "street": _osm_street(street)}
+    store.x("INSERT OR REPLACE INTO addr_cache(q, result, ts) VALUES(?,?,?)", (key, json.dumps(out), time.time()))
+    return out
+
+
+def _osm_street(s):
+    """'31 South Example Drive' -> '31 S Example Dr' (the way the rest of the app writes streets)."""
+    short = {"north": "N", "south": "S", "east": "E", "west": "W", "avenue": "Ave", "street": "St", "drive": "Dr",
+             "road": "Rd", "court": "Ct", "lane": "Ln", "boulevard": "Blvd", "place": "Pl", "circle": "Cir",
+             "highway": "Hwy", "parkway": "Pkwy"}
+    return " ".join(short.get(w.lower(), w) for w in s.split())
+
+
 STREET_TYPES = {"ave", "avenue", "st", "street", "dr", "drive", "rd", "road", "ct", "court", "ln", "lane", "way",
                 "blvd", "boulevard", "pl", "place", "cir", "circle", "hwy", "highway", "pkwy", "parkway", "ter",
                 "terrace", "trl", "trail", "loop", "sq", "square"}
@@ -272,7 +322,7 @@ def _street_extras(a):
     return a, how, sure, bool(m)
 
 
-def fix(a, lookup=True, zip_city=None, city_zip=None):
+def fix(a, lookup=True, zip_city=None, city_zip=None, osm_lookup=False):
     """(fixed address, how, confident) — how: list of what was done."""
     a, how, confident, po_box = _street_extras(a)
     before = dict(a)
@@ -371,8 +421,27 @@ def fix(a, lookup=True, zip_city=None, city_zip=None):
             how.append(f"the address lookup failed ({failed}): rebuild the plan later to try again")
             confident = False
         elif needs_lookup(a):
-            how.append("no match found: fill in by hand if you like")
-            confident = False
+            o = None
+            if osm_lookup:                            # second try: OpenStreetMap often has rural/newer addresses
+                try:
+                    o = osm(dict(a, street=core, city=city))
+                except Exception as e:
+                    log.warning("OpenStreetMap lookup failed: %s", e)
+            if o:
+                filled = [k for k in ("city", "region", "postal") if not (a.get(k) or "").strip() and o.get(k)]
+                for k in filled:
+                    a[k] = o[k]
+                how.append("the Census Bureau had no match; OpenStreetMap has " + o["street"] + ", "
+                           + ", ".join(x for x in (o["city"], o["region"], o["postal"]) if x)
+                           + (": filled in " + ", ".join({"city": "city", "region": "state", "postal": "ZIP"}[k]
+                                                         for k in filled) if filled else "") + " (check it)")
+                if o.get("street") and street_differs(core, o["street"]):
+                    a["street"] = "\n".join([o["street"] + (f" {unit}" if unit else "")] + lines[1:])
+                confident = False
+            else:
+                how.append("no match found (Census Bureau" + (" or OpenStreetMap" if osm_lookup else "")
+                           + "): fill in by hand if you like")
+                confident = False
     # still no ZIP: if every other contact in this town has the same one, suggest it (to check)
     town = ((a.get("city") or "").strip().lower(), state_code(a.get("region") or ""))
     if (a.get("street") or "").strip() and not (a.get("postal") or "").strip() and (city_zip or {}).get(town):

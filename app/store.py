@@ -18,6 +18,7 @@ DEFAULT_SETTINGS = {
     "write_mode": "test",       # off / test (only "Contact-Sync Test..." contacts) / on
     "backup_photos": True,      # nightly backup also saves every contact photo (Outlook: one read per contact)
     "address_lookup": True,     # cleanup may look up missing ZIP/state/city with the US Census geocoder (Brad OK 2026-11-17)
+    "osm_lookup": True,         # ...and, when the Census has no match, OpenStreetMap (Brad OK 2026-11-17)
     "sync_enabled": False,      # set by "Start syncing" on the Sync page
     "sync_minutes": 60,         # hourly
     "sync_max_deletes": 10,     # more deletes than this in one run wait for your OK
