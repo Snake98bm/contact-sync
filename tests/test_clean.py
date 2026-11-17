@@ -24,8 +24,8 @@ def test_phones():
     assert n("+44 20 7946 0000") == ("+442079460000", "")
     assert n("555-0100")[0] is None                       # too short to be sure
     assert n("020 7946 0000", "GB") == ("+442079460000", "")
-    assert clean.pretty_phone("+15555550100") == "+1 555 555 0100"
-    assert clean.pretty_phone("+15555550100", "23") == "+1 555 555 0100 x23"
+    assert clean.pretty_phone("+15555550100") == "(555) 555-0100"
+    assert clean.pretty_phone("+15555550100", "23") == "(555) 555-0100 x23"
 
 
 def test_names():
@@ -124,7 +124,7 @@ def test_analyse():
     assert r["sync_tool"]["lines"][0] == ("Synced by SyncGene # id #", 2), r["sync_tool"]["lines"]
     assert k["name_fixes"] == 1 and k["email_fixes"] == 1
     assert k["paired"] == 3, k                      # Pat and the two Mikes
-    assert any(f["new"] == "+1 555 555 0100" for f in r["phone_fixes"])
+    assert any(f["new"] == "(555) 555-0100" for f in r["phone_fixes"])
 
 
 if __name__ == "__main__":

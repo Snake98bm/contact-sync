@@ -50,11 +50,11 @@ def norm_phone(raw, region="US"):
 
 
 def pretty_phone(e164, ext=""):
-    """+15555550123 -> +1 555 555 0123; other countries keep the digits after the code together."""
+    """+15555550123 -> (555) 555-0123; other countries keep their +code and digits."""
     if not e164:
         return ""
     if e164.startswith("+1") and len(e164) == 12:
-        out = f"+1 {e164[2:5]} {e164[5:8]} {e164[8:]}"
+        out = f"({e164[2:5]}) {e164[5:8]}-{e164[8:]}"
     else:
         out = e164
     return out + (f" x{ext}" if ext else "")
