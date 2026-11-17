@@ -157,7 +157,7 @@ def build_plan():
     for g in rep["possible"]:
         mem = [c for pp in g["people"] for c in pp["members"] if (c["side"], c["id"]) not in in_combine]
         sides = {c["side"] for c in mem}
-        if len(sides) < 2 or any((c["side"], c["id"]) in linked for c in mem):
+        if len(sides) < 2:               # (an already linked copy is fine: the extra one merges into it)
             continue
         same = not g["name"].startswith("same ")
         add("combine", mem[0]["name"] or "(no name)",

@@ -130,6 +130,10 @@ def setup():
     gg("people/c-v", "Vikki", "", None, ["281-7719"])
     # only in Microsoft
     ms("AAM-solo", "Solo", "Example", "solo@example.com", None)
+    # a linked pair plus a second Outlook copy with nothing shared (must merge, not be copied as new)
+    ms("AAM-l1", "Lisa", "Example", None, "(559) 555-0400")
+    gg("people/c-l", "Lisa", "Example", None, ["(559) 555-0400"])
+    ms("AAM-l2", "Lisa", "Example", None, "155935660177")
     # different names, same phone (a household line), already paired each
     ms("AAM-a", "Anna", "Example", "anna@example.com", "(559) 555-0300")
     gg("people/c-a", "Anna", "Example", "anna@example.com", ["(559) 555-0300"])
@@ -154,7 +158,8 @@ def test_cleanup():
     assert combos["Vikki"]["default"]
     shared = by("shared")
     assert len(shared) == 1 and not shared[0]["default"] and "Anna" in shared[0]["title"]
-    assert [i["title"] for i in by("copy")] == ["Solo Example"]
+    assert [i["title"] for i in by("copy")] == ["Solo Example"], [i["title"] for i in by("copy")]
+    assert combos["Lisa Example"]["default"] and len(combos["Lisa Example"]["members"]) == 3
     assert by("label")[0]["default"] and by("category")[0]["default"]
 
     # test mode refuses to apply
@@ -184,6 +189,10 @@ def test_cleanup():
     solo_g = [p for p in G.values() if (p.get("names") or [{}])[0].get("givenName") == "Solo"]
     assert len(solo_g) == 1 and store.q("SELECT 1 FROM links WHERE ms_id='AAM-solo'")
     assert "AAM-a" in MS and "AAM-b" in MS
+    lisas = [c for c in MS.values() if c.get("givenName") == "Lisa"]
+    assert len(lisas) == 1 and not any((p.get("names") or [{}])[0].get("givenName") == "Lisa" and p["resourceName"] != "people/c-l"
+                                       for p in G.values())
+    assert store.q("SELECT 1 FROM links WHERE g_id='people/c-l' AND ms_id=?", (lisas[0]["id"],))
     # label removed (contacts kept), Cal-Com copied to Outlook
     assert DELETED_GROUPS == ["contactGroups/imp"] and "people/c-greg" in G
     assert MS["AAM-greg"].get("categories") == ["Cal-Com"]
