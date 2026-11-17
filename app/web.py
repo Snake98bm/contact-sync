@@ -850,6 +850,10 @@ KIND_TITLE = {
                "staff, so each starts as “keep them separate”. To take the number or email off someone, tick "
                "them (it's removed from both their Microsoft and Google copies; their other numbers stay). "
                "“Combine” merges them into one contact like the section above."),
+    "address": ("Fix addresses", "Addresses typed into the street box are split into city, state and ZIP; a "
+                "missing state comes from the ZIP; a missing ZIP, city or state is looked up with the US Census "
+                "Bureau (only the street, city and state are sent). Ticked ones are confident; the boxes are "
+                "editable, so you can correct any of them or fill in an unticked one by hand and tick it."),
     "copy": ("Copy contacts that are only in one account", "Created in the other account and linked for sync."),
     "label": ("Remove a Google label", "Only the label goes; its contacts keep everything else."),
     "category": ("Copy a Google label to Outlook", "Adds an Outlook category to the Outlook copies of its members."),
@@ -883,6 +887,46 @@ document.getElementById('lbl_'+n).textContent=[v('given'),v('middle'),v('family'
 </script>"""
 
 
+SAVE_CHOICES_JS = """<script>(function(){
+// Keep the owner's ticks, choices and name edits in this browser, per plan, so a reload or a trip to
+// Settings doesn't lose them. Cleared once the plan has been applied (the page then shows results).
+const key='cs-cleanup-PLANID', f=document.getElementById('cf');if(!f)return;
+const save=()=>{try{const s={};for(const e of f.elements){if(!e.name||e.type==='hidden'||e.type==='submit')continue;
+const k=e.type==='checkbox'||e.type==='radio'?e.name+'|'+e.value:e.name;
+s[k]=(e.type==='checkbox'||e.type==='radio')?e.checked:e.value}localStorage.setItem(key,JSON.stringify(s))}catch(x){}};
+try{const s=JSON.parse(localStorage.getItem(key)||'null');if(s){for(const e of f.elements){if(!e.name)continue;
+const k=e.type==='checkbox'||e.type==='radio'?e.name+'|'+e.value:e.name;if(!(k in s))continue;
+if(e.type==='checkbox'||e.type==='radio')e.checked=s[k];else e.value=s[k];
+if(/^(given|middle|family|company)_/.test(e.name))e.dispatchEvent(new Event('input',{bubbles:true}))}
+const n=document.createElement('div');n.className='banner';n.textContent='Your earlier choices on this plan were restored.';
+f.parentNode.insertBefore(n,f)}}catch(x){}
+f.addEventListener('change',save);f.addEventListener('input',save);
+})()</script>"""
+
+
+def _address_rows(items):
+    """Each address: before, and editable boxes holding the proposed fix."""
+    rows = []
+    for i in items:
+        n, a, b = i["id"], i.get("after") or {}, i.get("before") or {}
+        before = ", ".join(x for x in ((b.get("street") or "").replace("\n", " / "), b.get("city"), b.get("region"),
+                                       b.get("postal"), b.get("country")) if x)
+        who = " ".join(pill(*SIDE[m["side"]]) for m in i["members"])
+        box = lambda k, ph, w: (f"<input type='text' name='addr_{n}_{k}' value='{esc(a.get(k, ''))}' placeholder='{ph}' "
+                                f"style='width:{w}px' onchange=\"document.getElementById('a{n}').checked=true\">")
+        rows.append(
+            f"<tr><td><input type='checkbox' name='item' value='{n}' id='a{n}' class='k-address'"
+            f"{' checked' if i['default'] else ''}></td><td>{esc(i['title'])} {who}"
+            f"<div class='muted small'>{esc((i.get('addr_type') or '').title())} · now: {esc(before) or '(empty)'}</div>"
+            f"<textarea name='addr_{n}_street' rows='{max(1, (a.get('street') or '').count(chr(10)) + 1)}' "
+            f"style='width:100%;max-width:420px;margin-top:4px' onchange=\"document.getElementById('a{n}').checked=true\">"
+            f"{esc(a.get('street', ''))}</textarea><div class='bar'>{box('city', 'City', 140)}{box('region', 'State', 60)}"
+            f"{box('postal', 'ZIP', 90)}{box('country', 'Country', 120)}</div></td>"
+            f"<td class='small'>{esc(i['detail'])}</td></tr>")
+    return ("<div class='card'><table><tr><th></th><th>Address (editable)</th><th>What was done</th></tr>"
+            + "".join(rows) + "</table></div>")
+
+
 def _shared_cards(items):
     """One card per shared phone/email: keep / remove from ticked people / combine."""
     out = []
@@ -910,6 +954,11 @@ def _shared_cards(items):
 
 def cleanup_page(plan, st, write_mode, msg="", error=""):
     b = ["<h1>Cleanup</h1>"]
+    if write_mode != "on" and not st["running"]:
+        b.append('<div class="banner err"><b>Nothing on this page can be applied until write mode is On.</b> '
+                 'Switch it first in <a href="/settings" target="_blank" rel="noopener">Settings → Write mode</a> '
+                 '(the cleanup changes real contacts). You can still review and tick now: your choices are kept in '
+                 'this browser, even if you reload the page.</div>')
     if msg:
         b.append(f'<div class="banner">{esc(msg)}</div>')
     if error:
@@ -933,19 +982,24 @@ def cleanup_page(plan, st, write_mode, msg="", error=""):
                  + "".join(f"<li>{esc(x)}</li>" for x in res["log"]) + "</ul></details>")
         b.append(f"<p>{build}</p>")
         return page("Cleanup", "/cleanup", "".join(b))
-    if write_mode != "on":
-        b.append('<div class="banner warnb">Review the plan now. To apply it, switch Settings → Write mode to '
-                 '“on” first: the cleanup changes real contacts.</div>')
     b.append(f"<p class='sub'>Plan made {when(plan['created'])} from both accounts. A backup is taken before "
              f"anything changes, and every change is kept in the contact's history (or the recycle bin), so it can "
              f"be undone.</p><p>{build}</p>")
     b.append(f'<form method="post" action="/cleanup/apply" id="cf"><input type="hidden" name="plan_id" '
              f'value="{plan["plan_id"]}">')
-    for kind in ("tidy", "combine", "shared", "copy", "label", "category"):
+    for kind in ("tidy", "address", "combine", "shared", "copy", "label", "category"):
         items = [i for i in plan["items"] if i["kind"] == kind]
         if not items:
             continue
         title, intro = KIND_TITLE[kind]
+        if kind == "address":
+            on = sum(1 for i in items if i["default"])
+            b.append(f"<h2>{esc(title)} <span class='muted'>({on} of {len(items)} ticked)</span></h2>"
+                     f"<p class='muted small'>{intro} <a href='#' onclick=\"document.querySelectorAll('.k-address')"
+                     f".forEach(x=>x.checked=true);return false\">tick all</a> · <a href='#' onclick=\"document"
+                     f".querySelectorAll('.k-address').forEach(x=>x.checked=false);return false\">untick all</a></p>")
+            b.append(_address_rows(items))
+            continue
         if kind == "shared":
             b.append(f"<h2>{esc(title)} <span class='muted'>({len(items)})</span></h2><p class='muted small'>{intro}</p>")
             b.append(_shared_cards(items))
@@ -968,8 +1022,9 @@ def cleanup_page(plan, st, write_mode, msg="", error=""):
                  f".querySelectorAll('.k-{kind}').forEach(x=>x.checked=false);return false\">untick all</a></p>"
                  "<div class='card'><table><tr><th></th><th>Contact</th><th>In</th><th>What changes</th></tr>"
                  + "".join(rows) + "</table></div>")
-    dis = "" if write_mode == "on" else " disabled"
-    b.append(f'<p style="margin-top:20px"><button{dis} onclick="return confirm(\'Apply the ticked changes to both '
-             f'accounts? A backup is taken first.\')">Apply the ticked changes</button></p></form>')
-    b.append(NAME_JS)
+    off = "" if write_mode == "on" else ("<span class='small' style='color:var(--bad);margin-left:10px'>Write mode "
+                                         "isn't On yet: switch it in Settings first.</span>")
+    b.append(f'<p style="margin-top:20px"><button onclick="return confirm(\'Apply the ticked changes to both '
+             f'accounts? A backup is taken first.\')">Apply the ticked changes</button>{off}</p></form>')
+    b.append(NAME_JS + SAVE_CHOICES_JS.replace("PLANID", str(int(plan["plan_id"]))))
     return page("Cleanup", "/cleanup", "".join(b))

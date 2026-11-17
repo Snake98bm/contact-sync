@@ -21,6 +21,7 @@ import logging
 import threading
 import time
 
+import addr
 import clean
 import google
 import model
@@ -31,7 +32,7 @@ import writer
 
 log = logging.getLogger("cleanup")
 LABEL = {"microsoft": "Microsoft 365", "google": "Google"}
-ORDER = ("tidy", "combine", "shared", "copy", "label", "category")
+ORDER = ("tidy", "address", "combine", "shared", "copy", "label", "category")
 PAUSE = 0.6               # between writes: stays well under Google's per-minute write limit
 
 SCHEMA = """
@@ -241,6 +242,28 @@ def build_plan():
             add("tidy", c["name"] or "(no name)", "; ".join(notes) + " — nothing to change", [c], False,
                 side=c["side"], noop=True)
 
+    # addresses: one item per person per address (both copies, when they hold the same address)
+    lookup = bool(store.load_settings().get("address_lookup", True))
+    for p in rep["people"]:
+        seen_addr = {}
+        for c in p["members"]:
+            for a in c.get("addr") or []:
+                k = (a.get("type"), _street_key(a))
+                seen_addr.setdefault(k, {"addr": a, "members": []})["members"].append(c)
+        for (typ, skey), g in seen_addr.items():
+            a = g["addr"]
+            after, how, confident = addr.fix(a, lookup=lookup)
+            changed = any((after.get(x) or "") != (a.get(x) or "") for x in ("street", "city", "region", "postal", "country"))
+            missing = [x for x in ("street", "city", "region", "postal") if not (after.get(x) or "").strip()]
+            if not changed and not missing:
+                continue
+            detail = "; ".join(how) if how else ""
+            if missing:
+                detail += ("; " if detail else "") + "still missing " + ", ".join(
+                    {"street": "street", "city": "city", "region": "state", "postal": "ZIP"}[x] for x in missing)
+            add("address", p["name"] or "(no name)", detail, g["members"], bool(changed and confident),
+                addr_type=typ, street_key=skey, before=a, after=after)
+
     # labels
     groups = {name: rn for rn, name in names.items()}
     if "Imported on 9/6" in groups:
@@ -293,7 +316,14 @@ def choices_from_form(plan_id, f, form_all):
                 if people:
                     out[n] = {"mode": "strip", "people": people}
         elif n in ticked:
-            out[n] = {"mode": "combine", "name": name} if i["kind"] == "combine" else True
+            if i["kind"] == "combine":
+                out[n] = {"mode": "combine", "name": name}
+            elif i["kind"] == "address":
+                fields = {k: (f(f"addr_{n}_{k}") or "").replace("\r\n", "\n").strip()
+                          for k in ("street", "city", "region", "postal", "country")}
+                out[n] = {"mode": "address", "fields": fields} if any(fields.values()) else True
+            else:
+                out[n] = True
     return out
 
 
@@ -338,7 +368,7 @@ def _apply(plan_id, selected, backup_runner):
         for i in items:
             state["step"] = f"{i['kind']}: {i['title']}"
             try:
-                result = {"tidy": _do_tidy, "combine": _do_combine, "shared": _do_shared, "copy": _do_copy,
+                result = {"tidy": _do_tidy, "address": _do_address, "combine": _do_combine, "shared": _do_shared, "copy": _do_copy,
                           "label": _do_label, "category": _do_category}[i["kind"]](i, region, names)
                 if result:
                     _say(f"✓ {i['title']}: {result}")
@@ -406,6 +436,38 @@ def _do_combine(item, region, _names):
         sync._new_link(ms_raw, g_raw)
     return (f"combined {len(fresh)} copies" + (f", {len(extra)} sent to the recycle bin" if extra else "")
             + (", linked for sync" if len(keepers) == 2 else ""))
+
+
+def _street_key(a):
+    first = (a.get("street") or "").replace("\r", "").split("\n")[0]
+    return " ".join(first.lower().replace(",", " ").replace(".", " ").split())
+
+
+def _do_address(item, region, _names):
+    """Write the (possibly edited) address to every copy that holds it."""
+    choice = item.get("choice") if isinstance(item.get("choice"), dict) else {}
+    fields = choice.get("fields") or item["after"]
+    new = {k: (fields.get(k) or "").strip() for k in ("street", "city", "region", "postal", "country")}
+    if new["region"]:
+        new["region"] = addr.state_code(new["region"])
+    done = []
+    for m in item["members"]:
+        try:
+            raw, c = _fresh(m)
+        except Exception:
+            continue
+        rec = model.editable(c)
+        same_type = [a for a in rec["addr"] if a.get("type") == item["addr_type"]]
+        target = next((a for a in same_type if _street_key(a) == item["street_key"]),
+                      same_type[0] if len(same_type) == 1 else None)
+        if target is None:
+            continue
+        if all((target.get(k) or "").strip() == new[k] for k in new):
+            continue
+        target.update(new)
+        writer.update([m], rec, action="cleanup", note="cleanup: address fixed")
+        done.append(LABEL[m["side"]])
+    return f"address updated in {' and '.join(done)}" if done else ""
 
 
 def _do_shared(item, region, names):

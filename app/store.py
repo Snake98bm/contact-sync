@@ -16,6 +16,7 @@ DEFAULT_SETTINGS = {
     "keep_days": 30,            # backups older than this are deleted
     "default_region": "US",     # country code assumed for phone numbers without one
     "write_mode": "test",       # off / test (only "Contact-Sync Test..." contacts) / on
+    "address_lookup": True,     # cleanup may look up missing ZIP/state/city with the US Census geocoder (Brad OK 2026-11-17)
     "sync_enabled": False,      # set by "Start syncing" on the Sync page
     "sync_minutes": 60,         # hourly
     "sync_max_deletes": 10,     # more deletes than this in one run wait for your OK

@@ -7,6 +7,7 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "app"))
 os.environ["DATA_DIR"] = tempfile.mkdtemp()
+import addr  # noqa: E402
 import cleanup  # noqa: E402
 import google  # noqa: E402
 import msgraph  # noqa: E402
@@ -21,6 +22,15 @@ sync.init()
 cleanup.init()
 writer.listener = sync.after_write
 cleanup.PAUSE = 0
+LOOKUPS = []
+
+
+def _fake_census(a):          # never the real service in tests
+    LOOKUPS.append(a)
+    return {"city": "Springfield", "region": "CA", "postal": "90000", "matched": "1 EXAMPLE AVE, SPRINGFIELD, CA, 90000"}
+
+
+addr.census = _fake_census
 
 MS, G, TRASH, GROUPS, DELETED_GROUPS = {}, {}, {}, {}, []
 CLOCK = [0]
@@ -177,7 +187,16 @@ def test_cleanup():
     form = {"plan_id": str(plan["plan_id"]), f"given_{jackie['id']}": "Jacqueline", f"family_{jackie['id']}": "Sample",
             f"shared_{sh['id']}": "strip"}
     multi = {"item": [str(i["id"]) for i in items if i["default"]], f"strip_{sh['id']}": [str(bob)]}
+    # addresses: Greg's (same on both copies) is one item; its ZIP was looked up; Solo's is edited by hand
+    adds = {i["title"]: i for i in by("address")}
+    g_addr = adds["Greg Example"]
+    assert len(g_addr["members"]) == 2 and g_addr["after"]["postal"] == "90000" and g_addr["default"]
+    assert "looked up ZIP" in g_addr["detail"] and LOOKUPS
+    solo = adds["Solo Example"]
+    form.update({f"addr_{solo['id']}_street": "5 Other St", f"addr_{solo['id']}_city": "Shelbyville",
+                 f"addr_{solo['id']}_region": "california", f"addr_{solo['id']}_postal": "90001"})
     selected = cleanup.choices_from_form(plan["plan_id"], lambda k: form.get(k, ""), lambda k: multi.get(k, []))
+    assert selected[solo["id"]]["mode"] == "address" and selected[solo["id"]]["fields"]["city"] == "Shelbyville"
     assert selected[jackie["id"]] == {"mode": "combine", "name": {"given": "Jacqueline", "middle": "", "family": "Sample",
                                                                   "company": ""}}
     assert selected[sh["id"]] == {"mode": "strip", "people": [bob]}
@@ -191,6 +210,9 @@ def test_cleanup():
     assert "unstructuredName" not in g["names"][0]
     assert MS["AAM-greg"]["personalNotes"] == "Gate code 12" and MS["AAM-greg"]["mobilePhone"] == "(559) 555-1234"
     assert MS["AAM-greg"]["emailAddresses"][0]["address"] == "greg@example.com"
+    assert MS["AAM-greg"]["homeAddress"]["postalCode"] == "90000" and g["addresses"][0]["postalCode"] == "90000"
+    sa = MS["AAM-solo"]["homeAddress"]
+    assert (sa["street"], sa["city"], sa["state"], sa["postalCode"]) == ("5 Other St", "Shelbyville", "CA", "90001"), sa
     # Jackie: one Outlook copy left, with both notes and the email; the other in the bin; linked
     jackies = [c for c in MS.values() if c.get("surname") == "Sample"]
     assert len(jackies) == 1 and "note one" in jackies[0]["personalNotes"] and "note two" in jackies[0]["personalNotes"]
