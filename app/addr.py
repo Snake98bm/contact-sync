@@ -264,6 +264,10 @@ def fix(a, lookup=True, zip_city=None):
     a, how, confident, po_box = _street_extras(a)
     before = dict(a)
     a = offline_fix(a)
+    lines = [ln.strip() for ln in (a.get("street") or "").replace("\r", "").split("\n") if ln.strip()]
+    if len(lines) >= 2 and re.fullmatch(r"\d+[A-Za-z]?(?:-\d+)?", lines[0]) and re.match(r"[A-Za-z]", lines[1]):
+        a["street"] = "\n".join([f"{lines[0]} {lines[1]}"] + lines[2:])     # "924" / "N Example" on two lines
+        how.append("joined the house number to its street")
     if (a.get("street") or "") != (before.get("street") or "") and any(
             (a.get(k) or "") != (before.get(k) or "") for k in ("city", "region", "postal")):
         how.append("split the address out of the street box")

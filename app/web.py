@@ -35,7 +35,7 @@ tr:last-child td{border-bottom:0}td.num{font-variant-numeric:tabular-nums;white-
 .pill{display:inline-block;padding:1px 9px;border-radius:99px;font-size:12.5px;font-weight:600;white-space:nowrap}
 .p-ok{color:var(--ok);background:var(--okbg)}.p-warn{color:var(--warn);background:var(--warnbg)}
 .p-bad{color:var(--bad);background:var(--badbg)}.p-info{color:var(--info);background:var(--infobg)}
-.p-mute{color:var(--mute);background:var(--mutebg)}.muted{color:var(--muted)}.small{font-size:13px}
+.p-mute{color:var(--mute);background:var(--mutebg)}tr.review>td{background:var(--warnbg)}.muted{color:var(--muted)}.small{font-size:13px}
 button,.btn{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:8px 14px;font:inherit;
 font-weight:600;cursor:pointer;text-decoration:none;display:inline-block}
 @media (prefers-color-scheme:dark){button,.btn{color:#0f1218}}
@@ -1087,9 +1087,13 @@ def _address_rows(items):
         who = " ".join(pill(*SIDE[m["side"]]) for m in i["members"])
         box = lambda k, ph, w: (f"<input type='text' name='addr_{n}_{k}' value='{esc(a.get(k, ''))}' placeholder='{ph}' "
                                 f"style='width:{w}px' onchange=\"document.getElementById('a{n}').checked=true\">")
+        # a fix was found but it isn't sure (ZIP correction, street suggestion, guess): yellow, for review
+        review = not i["default"] and any((a.get(k) or "") != (b.get(k) or "")
+                                          for k in ("street", "city", "region", "postal", "country"))
         rows.append(
-            f"<tr><td><input type='checkbox' name='item' value='{n}' id='a{n}' class='k-address'"
-            f"{' checked' if i['default'] else ''}></td><td>{esc(i['title'])} {who}"
+            f"<tr{' class=review' if review else ''}><td><input type='checkbox' name='item' value='{n}' id='a{n}' "
+            f"class='k-address'{' checked' if i['default'] else ''}></td><td>{esc(i['title'])} {who}"
+            f"{' ' + pill('Review', 'warn') if review else ''}"
             f"<div class='muted small'>{esc((i.get('addr_type') or '').title())} · now: {esc(before) or '(empty)'}</div>"
             f"<textarea name='addr_{n}_street' rows='{max(1, (a.get('street') or '').count(chr(10)) + 1)}' "
             f"style='width:100%;max-width:420px;margin-top:4px' onchange=\"document.getElementById('a{n}').checked=true\">"
@@ -1173,7 +1177,12 @@ def cleanup_page(plan, st, write_mode, msg="", error=""):
         title, intro = KIND_TITLE[kind]
         if kind == "address":
             on = sum(1 for i in items if i["default"])
+            rev = sum(1 for i in items if not i["default"] and any(
+                ((i.get("after") or {}).get(k) or "") != ((i.get("before") or {}).get(k) or "")
+                for k in ("street", "city", "region", "postal", "country")))
             b.append(f"<h2>{esc(title)} <span class='muted'>({on} of {len(items)} ticked)</span></h2>"
+                     + (f"<p class='small'>{pill(f'{rev} to review', 'warn')} yellow rows have a fix that isn't "
+                        "certain: check it, then tick it.</p>" if rev else "") +
                      f"<p class='muted small'>{intro} <a href='#' onclick=\"document.querySelectorAll('.k-address')"
                      f".forEach(x=>x.checked=true);return false\">tick all</a> · <a href='#' onclick=\"document"
                      f".querySelectorAll('.k-address').forEach(x=>x.checked=false);return false\">untick all</a></p>")

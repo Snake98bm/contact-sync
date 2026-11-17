@@ -205,6 +205,22 @@ def test_po_box_with_zip_in_street_box():
     assert a["street"] == "P.O. Box 5"
 
 
+def test_house_number_on_its_own_line():
+    seen = []
+
+    def fake(method, url, **kw):
+        seen.append(urllib.parse.unquote(url.split("address=")[1].split("&")[0]))
+        return {"result": {"addressMatches": []}}
+    real, net.request = net.request, fake
+    try:
+        a, how, ok = addr.fix(A("924\nN Example\nSpringfield, CA\nUnited States", "Springfield", "CA",
+                                country="United States"))
+    finally:
+        net.request = real
+    assert a["street"] == "924 N Example" and any("house number" in h for h in how), (a, how)
+    assert seen and seen[0].startswith("924 N Example"), seen
+
+
 def test_street_differs():
     assert addr.street_differs("Suite D 120 S. Example Oak", "120 N Example Oaks Dr")
     assert addr.street_differs("120 S Example Oaks Dr", "120 N Example Oaks Dr")
