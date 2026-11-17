@@ -158,7 +158,7 @@ UNIT_RE = re.compile(r"[,\s]*\b(?:suite|ste\.?|apt\.?|apartment|unit|bldg\.?|bui
 
 
 def split_unit(line):
-    """'120 S Example Oaks Dr Suite D' -> ('120 S Example Oaks Dr', 'Suite D')."""
+    """'47 S Example Elms Way Suite K' -> ('47 S Example Elms Way', 'Suite K')."""
     m = UNIT_RE.search(line or "")
     if not m:
         return (line or "").strip(), ""
@@ -167,7 +167,7 @@ def split_unit(line):
 
 def variants(core):
     """The street as typed, and, when it doesn't start with the house number, with the number first
-    ('Oak 120 S. Example' -> '120 S. Example Oak')."""
+    ('Elm 47 S. Example' -> '47 S. Example Elm')."""
     out = [core]
     if core and not core[0].isdigit():
         m = re.search(r"\b\d+[A-Za-z]?\b", core)

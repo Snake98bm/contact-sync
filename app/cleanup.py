@@ -509,7 +509,7 @@ def _do_combine(item, region, _names):
 
 def _street_key(a):
     """Street + suite/unit, ignoring capitals, punctuation, spelling ('Drive' = 'Dr', 'Suite' = 'Ste') and where
-    the unit was written ('Ste D 1 Example St', '1 Example St Ste D' and '1 Example St' / 'Ste D' are one place)."""
+    the unit was written ('Ste K 1 Example St', '1 Example St Ste K' and '1 Example St' / 'Ste K' are one place)."""
     lines = [ln.strip() for ln in (a.get("street") or "").replace("\r", "").split("\n") if ln.strip()]
     if not lines:
         return ""

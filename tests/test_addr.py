@@ -102,15 +102,15 @@ def test_wrong_zip_and_jumbled_street():
     def fake(method, url, **kw):
         q = urllib.parse.unquote(url.split("address=")[1].split("&")[0])
         seen.append(q)
-        if q.lower().startswith("120 s. example oak"):            # only the number-first order matches
-            return {"result": {"addressMatches": [{"matchedAddress": "120 S EXAMPLE OAKS DR, SPRINGFIELD, CA, 90002",
+        if q.lower().startswith("47 s. example elm"):            # only the number-first order matches
+            return {"result": {"addressMatches": [{"matchedAddress": "47 S EXAMPLE ELMS WAY, SPRINGFIELD, CA, 90002",
                                                    "addressComponents": {"city": "SPRINGFIELD", "state": "CA",
                                                                          "zip": "90002"}}]}}
         return {"result": {"addressMatches": []}}
     real, net.request = net.request, fake
     try:
-        a, how, ok = addr.fix(A("Oak Suite D 120 S. Example", "", "CA", "90001"))
-        assert a["street"] == "120 S Example Oaks Dr Suite D", a
+        a, how, ok = addr.fix(A("Elm Suite K 47 S. Example", "", "CA", "90001"))
+        assert a["street"] == "47 S Example Elms Way Suite K", a
         assert (a["city"], a["region"], a["postal"]) == ("Springfield", "CA", "90002"), a
         assert any("ZIP 90001 looks wrong" in h for h in how) and any("put in order" in h for h in how) and not ok, how
         assert all("Suite" not in q for q in seen), seen             # the suite is left out of the lookup
@@ -133,14 +133,14 @@ def test_street_type_guess_and_city_from_zip():
     real = net.request
     try:
         net.request = _census_with({("1946 Example Garden Ave", "Springfield"): "90003",
-                                    ("120 N Example Oaks Dr", "Springfield"): "90004"})
+                                    ("47 N Example Elms Dr", "Springfield"): "90004"})
         a, how, ok = addr.fix(A("1946 Example Garden", "Springfield", "CA", ""))
         assert (a["street"], a["postal"]) == ("1946 Example Garden Ave", "90003") and not ok, (a, how)
         assert any("street type guessed" in h for h in how)
         # no city, ZIP present: the city comes from other contacts with that ZIP
-        a, how, ok = addr.fix(A("120 N Example Oaks Dr Suite D", "", "CA", "90004"),
+        a, how, ok = addr.fix(A("47 N Example Elms Dr Suite K", "", "CA", "90004"),
                               zip_city=addr.zip_cities([A("x", "Springfield", "CA", "90004")]))
-        assert (a["street"], a["city"], a["postal"]) == ("120 N Example Oaks Dr Suite D", "Springfield", "90004"), a
+        assert (a["street"], a["city"], a["postal"]) == ("47 N Example Elms Dr Suite K", "Springfield", "90004"), a
         # two different street types both match: too unsure, nothing guessed
         net.request = _census_with({("5 Example Ave", "Springfield"): "90005", ("5 Example St", "Springfield"): "90006"})
         a, how, ok = addr.fix(A("5 Example", "Springfield", "CA", ""))
@@ -224,14 +224,14 @@ def test_house_number_on_its_own_line():
 def test_suite_anywhere_is_the_same_place():
     import cleanup
     k = lambda s: cleanup._street_key({"street": s})
-    assert k("525 W. Example\nSTE D") == k("STE D 525 W. Example") == k("525 W Example Suite D")
-    assert k("525 W Example Ste D") != k("525 W Example Ste E") and k("525 W Example") != k("525 W Example Ste D")
+    assert k("88 E. Example\nSte Q") == k("STE Q 88 E. Example") == k("88 E Example Suite Q")
+    assert k("88 E Example Ste Q") != k("88 E Example Ste R") and k("88 E Example") != k("88 E Example Ste Q")
     assert k("1 Example St\nSpringfield") == k("1 Example St")
 
 
 def test_street_differs():
-    assert addr.street_differs("Suite D 120 S. Example Oak", "120 N Example Oaks Dr")
-    assert addr.street_differs("120 S Example Oaks Dr", "120 N Example Oaks Dr")
+    assert addr.street_differs("Suite K 47 S. Example Elm", "47 N Example Elms Dr")
+    assert addr.street_differs("47 S Example Elms Dr", "47 N Example Elms Dr")
     assert not addr.street_differs("920 W. Example Ave", "920 W Example Avenue")
     assert not addr.street_differs("5 north example drive", "5 N EXAMPLE DR")
 
