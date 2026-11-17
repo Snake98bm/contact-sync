@@ -35,7 +35,7 @@ tr:last-child td{border-bottom:0}td.num{font-variant-numeric:tabular-nums;white-
 .pill{display:inline-block;padding:1px 9px;border-radius:99px;font-size:12.5px;font-weight:600;white-space:nowrap}
 .p-ok{color:var(--ok);background:var(--okbg)}.p-warn{color:var(--warn);background:var(--warnbg)}
 .p-bad{color:var(--bad);background:var(--badbg)}.p-info{color:var(--info);background:var(--infobg)}
-.p-mute{color:var(--mute);background:var(--mutebg)}tr.review>td{background:var(--warnbg)}tr.review:has(input:checked)>td{background:none}tr.review:has(input:checked) .p-warn{color:var(--ok);background:var(--okbg)}tr.review:has(input:checked) .rv:after{content:"ed"}.muted{color:var(--muted)}.small{font-size:13px}
+.p-mute{color:var(--mute);background:var(--mutebg)}tr.person>td{border-bottom:none;padding-bottom:0}tr.sub>td:nth-child(2){padding-left:22px}.rm{display:block;margin-top:4px}tr:has(.rm input:checked) textarea,tr:has(.rm input:checked) .bar input{text-decoration:line-through;opacity:.5}tr.review>td{background:var(--warnbg)}tr.review:has(input:checked)>td{background:none}tr.review:has(input:checked) .p-warn{color:var(--ok);background:var(--okbg)}tr.review:has(input:checked) .rv:after{content:"ed"}.muted{color:var(--muted)}.small{font-size:13px}
 button,.btn{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:8px 14px;font:inherit;
 font-weight:600;cursor:pointer;text-decoration:none;display:inline-block}
 @media (prefers-color-scheme:dark){button,.btn{color:#0f1218}}
@@ -1081,30 +1081,47 @@ REVIEW_PILL = ' <span class="pill p-warn rv">Review</span>'    # reads "Reviewed
 
 
 def _address_rows(items):
-    """Each address: before, and editable boxes holding the proposed fix."""
+    """Each address: before, and editable boxes holding the proposed fix. One person's addresses sit together
+    under one heading."""
+    import itertools
     rows = []
-    for i in items:
-        n, a, b = i["id"], i.get("after") or {}, i.get("before") or {}
-        before = ", ".join(x for x in ((b.get("street") or "").replace("\n", " / "), b.get("city"), b.get("region"),
-                                       b.get("postal"), b.get("country")) if x)
-        who = " ".join(pill(*SIDE[m["side"]]) for m in i["members"])
-        box = lambda k, ph, w: (f"<input type='text' name='addr_{n}_{k}' value='{esc(a.get(k, ''))}' placeholder='{ph}' "
-                                f"style='width:{w}px' onchange=\"document.getElementById('a{n}').checked=true\">")
-        # a fix was found but it isn't sure (ZIP correction, street suggestion, guess): yellow, for review
-        review = not i["default"] and any((a.get(k) or "") != (b.get(k) or "")
-                                          for k in ("street", "city", "region", "postal", "country"))
-        rows.append(
-            f"<tr{' class=review' if review else ''}><td><input type='checkbox' name='item' value='{n}' id='a{n}' "
-            f"class='k-address'{' checked' if i['default'] else ''}></td><td>{esc(i['title'])} {who}"
-            f"{REVIEW_PILL if review else ''}"
-            f"<div class='muted small'>{esc((i.get('addr_type') or '').title())} · was: {esc(before) or '(empty)'}</div>"
-            f"<textarea name='addr_{n}_street' rows='{max(1, (a.get('street') or '').count(chr(10)) + 1)}' "
-            f"style='width:100%;max-width:420px;margin-top:4px' onchange=\"document.getElementById('a{n}').checked=true\">"
-            f"{esc(a.get('street', ''))}</textarea><div class='bar'>{box('city', 'City', 140)}{box('region', 'State', 60)}"
-            f"{box('postal', 'ZIP', 90)}{box('country', 'Country', 120)}</div></td>"
-            f"<td class='small'>{esc(i['detail'])}</td></tr>")
+    for title, grp in itertools.groupby(items, key=lambda i: i["title"]):
+        grp = list(grp)
+        if len(grp) > 1:
+            sides = {m["side"] for i in grp for m in i["members"]}
+            rows.append(f"<tr class='person'><td></td><td colspan='2'><b>{esc(title)}</b> "
+                        + " ".join(pill(*SIDE[s]) for s in ("microsoft", "google") if s in sides)
+                        + f" <span class='muted small'>· {len(grp)} addresses to check</span></td></tr>")
+        rows += [_address_row(i, show_name=len(grp) == 1) for i in grp]
     return ("<div class='card'><table><tr><th></th><th>Address (editable)</th><th>What was done</th></tr>"
             + "".join(rows) + "</table></div>")
+
+
+def _address_row(i, show_name=True):
+    n, a, b = i["id"], i.get("after") or {}, i.get("before") or {}
+    before = ", ".join(x for x in ((b.get("street") or "").replace("\n", " / "), b.get("city"), b.get("region"),
+                                   b.get("postal"), b.get("country")) if x)
+    who = " ".join(pill(*SIDE[m["side"]]) for m in i["members"])
+    tick = f"document.getElementById('a{n}').checked=true"
+    box = lambda k, ph, w: (f"<input type='text' name='addr_{n}_{k}' value='{esc(a.get(k, ''))}' placeholder='{ph}' "
+                            f"style='width:{w}px' onchange=\"{tick}\">")
+    # a fix was found but it isn't sure (ZIP correction, street suggestion, guess): yellow, for review
+    review = not i["default"] and any((a.get(k) or "") != (b.get(k) or "")
+                                      for k in ("street", "city", "region", "postal", "country"))
+    typ = esc((i.get("addr_type") or "").title())
+    head = f"{esc(i['title'])} {who}" if show_name else f"<b>{typ or 'Address'}</b> {who}"
+    return (
+        f"<tr class='{'review' if review else ''}{'' if show_name else ' sub'}'><td><input type='checkbox' name='item' "
+        f"value='{n}' id='a{n}' class='k-address'{' checked' if i['default'] else ''}></td><td>{head}"
+        f"{REVIEW_PILL if review else ''}"
+        f"<div class='muted small'>{typ + ' · ' if show_name else ''}was: {esc(before) or '(empty)'}</div>"
+        f"<textarea name='addr_{n}_street' rows='{max(1, (a.get('street') or '').count(chr(10)) + 1)}' "
+        f"style='width:100%;max-width:420px;margin-top:4px' onchange=\"{tick}\">"
+        f"{esc(a.get('street', ''))}</textarea><div class='bar'>{box('city', 'City', 140)}{box('region', 'State', 60)}"
+        f"{box('postal', 'ZIP', 90)}{box('country', 'Country', 120)}</div>"
+        f"<label class='small rm'><input type='checkbox' name='addr_{n}_remove' value='1' "
+        f"onchange=\"if(this.checked){tick}\"> Remove this address instead</label></td>"
+        f"<td class='small'>{esc(i['detail'])}</td></tr>")
 
 
 def _shared_cards(items):

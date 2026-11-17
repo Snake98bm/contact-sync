@@ -221,6 +221,14 @@ def test_house_number_on_its_own_line():
     assert seen and seen[0].startswith("924 N Example"), seen
 
 
+def test_suite_anywhere_is_the_same_place():
+    import cleanup
+    k = lambda s: cleanup._street_key({"street": s})
+    assert k("525 W. Example\nSTE D") == k("STE D 525 W. Example") == k("525 W Example Suite D")
+    assert k("525 W Example Ste D") != k("525 W Example Ste E") and k("525 W Example") != k("525 W Example Ste D")
+    assert k("1 Example St\nSpringfield") == k("1 Example St")
+
+
 def test_street_differs():
     assert addr.street_differs("Suite D 120 S. Example Oak", "120 N Example Oaks Dr")
     assert addr.street_differs("120 S Example Oaks Dr", "120 N Example Oaks Dr")

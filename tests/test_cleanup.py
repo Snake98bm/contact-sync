@@ -297,6 +297,13 @@ def test_address_typed_two_ways_is_one_row():
     cleanup._do_address(rows[0], "US", {})
     assert MS["AAM-twin"]["homeAddress"]["street"] == "7 Sample Rd" and MS["AAM-twin"]["homeAddress"]["postalCode"] == "90007"
     assert not (MS["AAM-twin"].get("otherAddress") or {}).get("street"), MS["AAM-twin"]       # one copy kept
+    # the owner can remove an address instead of fixing it
+    form = {f"addr_{rows[0]['id']}_remove": "1"}
+    plan_id = cleanup.latest_plan()["plan_id"]
+    choice = cleanup.choices_from_form(plan_id, form.get, lambda k: [str(rows[0]["id"])] if k == "item" else [])
+    assert choice[rows[0]["id"]] == {"mode": "remove"}, choice
+    msg = cleanup._do_address(dict(rows[0], choice=choice[rows[0]["id"]], street_keys=["7 Sample Rd"]), "US", {})
+    assert "removed" in msg and not (MS["AAM-twin"].get("homeAddress") or {}).get("street"), MS["AAM-twin"]
 
 
 if __name__ == "__main__":

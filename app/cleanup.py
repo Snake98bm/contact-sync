@@ -376,6 +376,8 @@ def choices_from_form(plan_id, f, form_all):
         elif n in ticked:
             if i["kind"] == "combine":
                 out[n] = {"mode": "combine", "name": name}
+            elif i["kind"] == "address" and f(f"addr_{n}_remove"):
+                out[n] = {"mode": "remove"}
             elif i["kind"] == "address":
                 fields = {k: (f(f"addr_{n}_{k}") or "").replace("\r\n", "\n").strip()
                           for k in ("street", "city", "region", "postal", "country")}
@@ -506,9 +508,17 @@ def _do_combine(item, region, _names):
 
 
 def _street_key(a):
-    """First street line, ignoring capitals, punctuation and spelling ('Drive' = 'Dr', 'North' = 'N')."""
-    first = (a.get("street") or "").replace("\r", "").split("\n")[0]
-    return " ".join(addr._street_words(first))
+    """Street + suite/unit, ignoring capitals, punctuation, spelling ('Drive' = 'Dr', 'Suite' = 'Ste') and where
+    the unit was written ('Ste D 1 Example St', '1 Example St Ste D' and '1 Example St' / 'Ste D' are one place)."""
+    lines = [ln.strip() for ln in (a.get("street") or "").replace("\r", "").split("\n") if ln.strip()]
+    if not lines:
+        return ""
+    core, unit = addr.split_unit(lines[0])
+    if not unit:
+        unit = next((ln for ln in lines[1:] if addr.UNIT_RE.fullmatch(ln)), "")
+    key = " ".join(addr._street_words(core))
+    return key + (" | " + " ".join(addr._street_words(unit)) if unit and key else "") if key else \
+        " ".join(addr._street_words(unit))
 
 
 def _no_clash(a, b):
@@ -540,6 +550,11 @@ def _do_address(item, region, _names):
             targets = same_type
         if not targets:
             continue
+        if choice.get("mode") == "remove":             # the owner chose to delete this address
+            rec["addr"] = [a for a in rec["addr"] if all(a is not x for x in targets)]
+            writer.update([m], rec, action="cleanup", note="cleanup: address removed")
+            done.append(LABEL[m["side"]])
+            continue
         keep, extra = targets[0], targets[1:]          # once fixed they'd be the same address: keep one
         if not extra and all((keep.get(k) or "").strip() == new[k] for k in new):
             continue
@@ -547,6 +562,8 @@ def _do_address(item, region, _names):
         rec["addr"] = [a for a in rec["addr"] if all(a is not x for x in extra)]
         writer.update([m], rec, action="cleanup", note="cleanup: address fixed")
         done.append(LABEL[m["side"]])
+    if choice.get("mode") == "remove":
+        return f"address removed from {' and '.join(done)}" if done else ""
     return f"address updated in {' and '.join(done)}" if done else ""
 
 

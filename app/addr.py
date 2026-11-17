@@ -208,7 +208,8 @@ TRY_TYPES = ("Ave", "St", "Dr", "Rd", "Ct", "Ln", "Way")
 _ABBR = {"avenue": "ave", "av": "ave", "street": "st", "drive": "dr", "road": "rd", "court": "ct", "lane": "ln",
          "boulevard": "blvd", "place": "pl", "circle": "cir", "highway": "hwy", "parkway": "pkwy", "terrace": "ter",
          "trail": "trl", "square": "sq", "north": "n", "south": "s", "east": "e", "west": "w",
-         "northeast": "ne", "northwest": "nw", "southeast": "se", "southwest": "sw"}
+         "northeast": "ne", "northwest": "nw", "southeast": "se", "southwest": "sw",
+         "suite": "ste", "apartment": "apt", "building": "bldg", "space": "spc", "number": "#"}
 
 
 def _street_words(s):
