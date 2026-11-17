@@ -98,7 +98,7 @@ def _site():
 
 # reachable without signing in
 OPEN_PATHS = {"/login", "/setup", "/cert", "/ca.crt", "/auth/login/options", "/auth/login",
-              "/auth/register/options", "/auth/register"}
+              "/auth/register/options", "/auth/register", "/setup/password", "/login/password"}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -155,6 +155,12 @@ class Handler(BaseHTTPRequestHandler):
     def _signed_in(self):
         return auth.logged_in(self.headers.get("Cookie"))
 
+    @staticmethod
+    def _access(new_key=""):
+        return {"passkeys": auth.credentials(), "has_password": auth.has_password(),
+                "api_keys": auth.api_keys(), "env_key": bool(auth.API_KEY), "new_key": new_key,
+                "min_len": auth.MIN_LEN}
+
     def _gate(self, path):
         """True if the request was answered here. /api/ also accepts the API key."""
         if path.startswith("/api/") and auth.api_key_ok(self.headers.get("Authorization")):
@@ -195,7 +201,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/login":
             if not auth.is_set():
                 return self._redirect("/setup")
-            return self._send(200, web.login_page(self._safe_next(qs.get("next", ["/"])[0])))
+            return self._send(200, web.login_page(self._safe_next(qs.get("next", ["/"])[0]),
+                                                  has_password=auth.has_password(), has_passkey=bool(auth.credentials())))
         if path == "/":
             last = (store.q("SELECT * FROM runs ORDER BY id DESC LIMIT 1") or [None])[0]
             return self._send(200, web.dashboard(msgraph.status(), google.status(), runner.progress,
@@ -214,7 +221,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, data, "application/octet-stream",
                               {"Content-Disposition": f'attachment; filename="{m.group(1)}_{m.group(2)}"'})
         if path == "/settings":
-            return self._send(200, web.settings_page(store.load_settings(), auth.credentials(),
+            return self._send(200, web.settings_page(store.load_settings(), self._access(),
                                                      saved="saved" in qs, error=qs.get("error", [""])[0],
                                                      cert=tls.fingerprint()))
         if path == "/signin/microsoft":
@@ -306,9 +313,55 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/logout-everywhere":
             auth.logout_everywhere()
             return self._redirect("/login", auth.clear_cookie(self.secure))
+        back = lambda err: self._redirect("/settings?" + (urllib.parse.urlencode({"error": err}) if err else "saved=1"))
+        if path == "/setup/password":
+            if auth.is_set():
+                return self._redirect("/")
+            if auth.too_many_failures(self._ip()):
+                return self._send(429, web.setup_page(next(iter(_site()[1])), "Too many tries. Wait 5 minutes."))
+            if not auth.check_setup_code(f("code")):
+                auth.note_failure(self._ip())
+                log.warning("wrong setup code from %s", self._ip())
+                return self._send(403, web.setup_page(next(iter(_site()[1])), "That setup code is wrong."))
+            if f("password") != f("password2"):
+                return self._send(400, web.setup_page(next(iter(_site()[1])), "The two passwords don't match."))
+            try:
+                auth.set_password(f("password"))
+            except ValueError as e:
+                return self._send(400, web.setup_page(next(iter(_site()[1])), str(e)))
+            log.info("first sign-in method: password, from %s", self._ip())
+            return self._redirect("/", auth.make_cookie(self.secure))
+        if path == "/login/password":
+            nxt = self._safe_next(f("next") or "/")
+            if auth.too_many_failures(self._ip()):
+                return self._send(429, web.login_page(nxt, "Too many tries. Wait 5 minutes.", auth.has_password(), bool(auth.credentials())))
+            if not auth.check_password(f("password")):
+                auth.note_failure(self._ip())
+                log.warning("wrong password from %s", self._ip())
+                return self._send(401, web.login_page(nxt, "Wrong password.", auth.has_password(), bool(auth.credentials())))
+            log.info("signed in with the password from %s", self._ip())
+            return self._redirect(nxt, auth.make_cookie(self.secure))
+        if path == "/password":
+            if auth.has_password() and not auth.check_password(f("current")):
+                auth.note_failure(self._ip())
+                return back("Current password is wrong.")
+            if f("password") != f("password2"):
+                return back("The two new passwords don't match.")
+            try:
+                auth.set_password(f("password"))
+            except ValueError as e:
+                return back(str(e))
+            auth.logout_everywhere()            # other browsers must sign in again
+            return self._redirect("/settings?saved=1", auth.make_cookie(self.secure))
+        if path == "/password/remove":
+            return back(auth.remove_password())
+        if path == "/apikeys/new":
+            key = auth.create_api_key(f("name"))
+            return self._send(200, web.settings_page(store.load_settings(), self._access(key), cert=tls.fingerprint()))
+        if path == "/apikeys/revoke":
+            return back(auth.revoke_api_key(f("id")))
         if path == "/passkeys/remove":
-            err = auth.remove_credential(f("id"))
-            return self._redirect("/settings?" + (urllib.parse.urlencode({"error": err}) if err else "saved=1"))
+            return back(auth.remove_credential(f("id")))
         if path == "/settings":
             s = store.load_settings()
             try:
@@ -324,7 +377,7 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("Country must be two letters, like US")
                 new.update(backup_time=t, keep_days=keep, default_region=region)
             except ValueError as e:
-                return self._send(400, web.settings_page(s, auth.credentials(), error=str(e), cert=tls.fingerprint()))
+                return self._send(400, web.settings_page(s, self._access(), error=str(e), cert=tls.fingerprint()))
             store.save_settings(new)
             return self._redirect("/settings?saved=1")
         if path in ("/run", "/api/run"):

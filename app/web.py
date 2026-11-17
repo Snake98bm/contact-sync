@@ -122,38 +122,51 @@ function guessName(){const u=navigator.userAgent;return /iPhone/.test(u)?'iPhone
 </script>"""
 
 
-def setup_page(origin):
-    body = f"""<h1>Set up your passkey</h1>
-<p class="sub">This site signs you in with a passkey (Windows Hello, your phone, or a security key) instead of a
-password. You'll add the first one now.</p>
-<div id="msg" class="banner" hidden></div>
+def setup_page(origin, error=""):
+    body = f"""<h1>Set up sign-in</h1>
+<p class="sub">Choose how you'll sign in to this site. You can add the other one later in Settings.</p>
+<div id="msg" class="banner{' err' if error else ''}"{'' if error else ' hidden'}>{esc(error)}</div>
 <label>Setup code</label><input type="text" id="code" autocomplete="off" autocapitalize="characters"
 style="width:200px;text-transform:uppercase;letter-spacing:.1em" placeholder="ABCD2345">
 <div class="hint">A one-time code printed in the container's log (Dockhand → contact-sync → Logs). It stops
-working once the first passkey exists.</div>
+working once the first sign-in method exists.</div>
+<div class="grid2" style="margin-top:16px">
+<div class="card pad"><b>Passkey</b> <span class="muted small">(recommended)</span>
+<p class="small">Windows Hello, your phone, or a security key. Nothing to remember or type.</p>
 <label>Name for this passkey</label><input type="text" id="name" maxlength="60">
 <p><button id="go">Create passkey</button></p>
-<p class="small"><a href="/cert">Install this site's certificate</a> first if your browser shows a warning.</p>
+<p class="small"><a href="/cert">Install this site's certificate</a> first: passkeys need it.</p></div>
+<div class="card pad"><b>Password</b>
+<form method="post" action="/setup/password" onsubmit="this.code.value=document.getElementById('code').value">
+<input type="hidden" name="code"><label>Password</label><input type="password" name="password"
+autocomplete="new-password" minlength="10"><label>Again</label><input type="password" name="password2"
+autocomplete="new-password"><div class="hint">At least 10 characters.</div>
+<p><button>Set password</button></p></form></div></div>
 {PASSKEY_JS}<script>
 document.getElementById('name').value=guessName();
-document.getElementById('go').onclick=async()=>{{if(!supported())return;say('Follow your device\\'s prompt…');
+document.getElementById('go').onclick=async()=>{{if(!supported())return;say('Follow your device\'s prompt…');
 try{{await addPasskey(document.getElementById('code').value,document.getElementById('name').value);location.href='/'}}
-catch(e){{say(nice(e),true)}}}};supported();</script>"""
+catch(e){{say(nice(e),true)}}}};</script>"""
     return page("Set up", "", body, nav_on=False)
 
 
-def login_page(nxt="/"):
-    body = f"""<h1>Sign in</h1><p class="sub">Use your passkey.</p>
-<div id="msg" class="banner" hidden></div>
-<p><button id="go">Sign in with a passkey</button></p>
+def login_page(nxt="/", error="", has_password=False, has_passkey=True):
+    pk = f"""<p><button id="go">Sign in with a passkey</button></p>""" if has_passkey else ""
+    pw = f"""<form method="post" action="/login/password" style="margin-top:18px">
+<input type="hidden" name="next" value="{esc(nxt)}"><label>Password</label>
+<input type="password" name="password" autocomplete="current-password" {'' if has_passkey else 'autofocus'}>
+<p><button{' class="ghost"' if has_passkey else ''}>Sign in with password</button></p></form>""" if has_password else ""
+    body = f"""<h1>Sign in</h1>
+<div id="msg" class="banner{' err' if error else ''}"{'' if error else ' hidden'}>{esc(error)}</div>
+{pk}{pw}
 <p class="small"><a href="/cert">Install this site's certificate</a> on a new device first.</p>
-<p class="muted small">Lost every passkey? Delete <code>auth.json</code> in the container's data folder and
-restart it; a new setup code is printed in the log.</p>
+<p class="muted small">Locked out? Delete <code>auth.json</code> in the container's data folder and restart it;
+a new setup code is printed in the log.</p>
 {PASSKEY_JS}<script>
-const nxt={json.dumps(nxt).replace("<", "\\u003c")};
-async function go(){{if(!supported())return;say('');try{{const r=await signIn(nxt);location.href=r.next||'/'}}
-catch(e){{say(nice(e),true)}}}}
-document.getElementById('go').onclick=go;</script>"""
+const nxt={json.dumps(nxt).replace("<", "\u003c")};
+const b=document.getElementById('go');
+if(b)b.onclick=async()=>{{if(!supported())return;say('');try{{const r=await signIn(nxt);location.href=r.next||'/'}}
+catch(e){{say(nice(e),true)}}}};</script>"""
     return page("Sign in", "", body, nav_on=False)
 
 
@@ -231,8 +244,6 @@ def dashboard(ms, gg, job, report, last_run, next_backup, api_on):
     else:
         b.append('<p class="muted">No report yet. Sign in to both accounts, then click '
                  '<b>Back up and build report now</b>.</p>')
-    if not api_on:
-        b.append('<p class="muted small">API key: off (set API_KEY to enable /api/ access for scripts).</p>')
     return page("Dashboard", "/", "".join(b), refresh=job["running"])
 
 
@@ -385,15 +396,41 @@ def backups_page(items):
     return page("Backups", "/backups", body)
 
 
-def settings_page(s, passkeys, saved=False, error="", cert=""):
+def settings_page(s, access, saved=False, error="", cert=""):
     chk = lambda k: " checked" if s[k] else ""
-    rows = "".join(
+    pk_rows = "".join(
         f"<tr><td>{esc(p['name'])}</td><td class='num'>{when(p['created'])}</td><td class='num'>{when(p['last_used'])}</td>"
         f"<td><form method='post' action='/passkeys/remove' class='inline' onsubmit=\"return confirm('Remove this passkey?')\">"
         f"<input type='hidden' name='id' value='{esc(p['id'])}'><button class='ghost'>Remove</button></form></td></tr>"
-        for p in passkeys)
+        for p in access["passkeys"]) or "<tr><td colspan='4' class='muted'>No passkeys yet.</td></tr>"
+    key_rows = "".join(
+        f"<tr><td>{esc(k['name'])}</td><td><code>{esc(k['prefix'])}…</code></td><td class='num'>{when(k['created'])}</td>"
+        f"<td class='num'>{when(k['last_used'])}</td><td><form method='post' action='/apikeys/revoke' class='inline' "
+        f"onsubmit=\"return confirm('Revoke this key? Anything using it stops working.')\">"
+        f"<input type='hidden' name='id' value='{esc(k['id'])}'><button class='ghost'>Revoke</button></form></td></tr>"
+        for k in access["api_keys"])
+    if access["env_key"]:
+        key_rows += ("<tr><td>From the container setting <code>API_KEY</code></td><td></td><td></td><td></td>"
+                     "<td class='muted small'>change it in the stack</td></tr>")
+    key_rows = key_rows or "<tr><td colspan='5' class='muted'>No API keys.</td></tr>"
+    new_key = ""
+    if access["new_key"]:
+        new_key = (f'<div class="banner"><b>New API key. Copy it now; it won\'t be shown again.</b><br>'
+                   f'<code class="break" style="font-size:15px">{esc(access["new_key"])}</code><br>'
+                   f'<span class="small">Use it as <code>Authorization: Bearer &lt;key&gt;</code>.</span></div>')
+    has_pw = access["has_password"]
+    pw_form = f"""<form method="post" action="/password">
+{'<label>Current password</label><input type="password" name="current" autocomplete="current-password">' if has_pw else ''}
+<label>{'New password' if has_pw else 'Password'}</label><input type="password" name="password" autocomplete="new-password"
+minlength="{access['min_len']}"><label>Again</label><input type="password" name="password2" autocomplete="new-password">
+<div class="hint">At least {access['min_len']} characters. Changing it signs out every other browser.</div>
+<p><button>{'Change password' if has_pw else 'Set password'}</button></p></form>"""
+    if has_pw:
+        pw_form += ("<form method='post' action='/password/remove' onsubmit=\"return confirm('Remove the password? "
+                    "You will sign in with a passkey only.')\"><button class='ghost' style='padding:0'>Remove the "
+                    "password (passkeys only)</button></form>")
     body = f"""<h1>Settings</h1>{'<div class="banner">Saved.</div>' if saved else ''}
-{f'<div class="banner err">{esc(error)}</div>' if error else ''}
+{f'<div class="banner err">{esc(error)}</div>' if error else ''}{new_key}
 <form method="post" action="/settings">
 <label class="check"><input type="checkbox" name="backup_enabled"{chk('backup_enabled')}> Nightly backup and report</label>
 <label>Time</label><input type="time" name="backup_time" value="{esc(s['backup_time'])}">
@@ -401,23 +438,36 @@ def settings_page(s, passkeys, saved=False, error="", cert=""):
 <label>Country for phone numbers without a code</label><input type="text" name="default_region" maxlength="2"
 value="{esc(s['default_region'])}"><div class="hint">Two letters, e.g. US, CA, GB, AU.</div>
 <p><button>Save</button></p></form>
+
 <h2>Passkeys</h2><div class="card"><table><tr><th>Name</th><th>Added</th><th>Last used</th><th></th></tr>
-{rows}</table></div>
+{pk_rows}</table></div>
 <div id="msg" class="banner" hidden></div>
 <div class="bar" style="margin-top:12px"><input type="text" id="pkname" maxlength="60" placeholder="Name, e.g. iPhone">
 <button id="addpk">Add a passkey</button></div>
-<div class="hint">Add one for each device (or a phone you can use from any computer). The last passkey can't be removed.</div>
-<form method="post" action="/logout-everywhere" style="margin-top:10px"><button class="ghost" style="padding:0">Sign out on
-every device</button></form>
-{PASSKEY_JS}<script>document.getElementById('pkname').value=guessName();
-document.getElementById('addpk').onclick=async()=>{{if(!supported())return;say('Follow your device\\'s prompt…');
-try{{await addPasskey('',document.getElementById('pkname').value);location.href='/settings?saved=1'}}
-catch(e){{say(nice(e),true)}}}};</script>
-<h2>Sign-out</h2><p class="small">Forget the saved sign-in for one account (it stays allowed on the account
+<div class="hint">Add one for each device (or a phone you can use from any computer). The last way to sign in
+can't be removed.</div>
+
+<h2>Password</h2><p class="small">{'A password is set. You can sign in with it or with a passkey.' if has_pw else
+'No password: sign-in is by passkey only. Set one to have both.'}</p>{pw_form}
+
+<h2>API keys</h2><p class="small">For scripts. A key opens only the <code>/api/</code> addresses (status, report,
+backups, run a backup), not the website or these settings.</p>
+<div class="card"><table><tr><th>Name</th><th>Starts with</th><th>Made</th><th>Last used</th><th></th></tr>
+{key_rows}</table></div>
+<form method="post" action="/apikeys/new" class="bar" style="margin-top:12px">
+<input type="text" name="name" maxlength="60" placeholder="Name, e.g. Home Assistant"><button>Make an API key</button></form>
+
+<h2>Sign-out</h2>
+<form method="post" action="/logout-everywhere"><button class="ghost" style="padding:0">Sign out on every device</button></form>
+<p class="small" style="margin-top:14px">Forget the saved sign-in for one account (it stays allowed on the account
 side until you remove the app there).</p>
 <form method="post" action="/signout/microsoft" class="inline"><button class="ghost">Forget Microsoft sign-in</button></form>
 <form method="post" action="/signout/google" class="inline"><button class="ghost">Forget Google sign-in</button></form>
 {f'<h2>HTTPS certificate</h2><p class="small">This site uses its own private certificate authority. '
  f'<a href="/cert">Install it on another device</a>. CA SHA-256 fingerprint:</p>'
- f'<p class="small break"><code>{esc(cert)}</code></p>' if cert else ''}"""
+ f'<p class="small break"><code>{esc(cert)}</code></p>' if cert else ''}
+{PASSKEY_JS}<script>document.getElementById('pkname').value=guessName();
+document.getElementById('addpk').onclick=async()=>{{if(!supported())return;say('Follow your device\'s prompt…');
+try{{await addPasskey('',document.getElementById('pkname').value);location.href='/settings?saved=1'}}
+catch(e){{say(nice(e),true)}}}};</script>"""
     return page("Settings", "/settings", body)

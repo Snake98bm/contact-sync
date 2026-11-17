@@ -1,12 +1,12 @@
 """Who may use the site.
 
-- People sign in with a passkey (Windows Hello, a phone, a security key). The very first passkey
-  needs the one-time setup code from the container log (or from /api/setup-code with the API
-  key), so nobody else on the network can claim the site first. More passkeys can be added from
-  Settings while signed in. Lost them all? Delete /data/auth.json and restart: a new setup code
-  is printed.
-- Scripts (and Claude) use the API key from the API_KEY env var, sent as
-  `Authorization: Bearer <key>`. It only opens /api/ routes.
+- People sign in with a passkey (Windows Hello, a phone, a security key) or a password. The very
+  first one (passkey or password) needs the one-time setup code from the container log (or from
+  /api/setup-code with an API key), so nobody else on the network can claim the site first. More
+  passkeys, and the password, are managed in Settings. Locked out? Delete /data/auth.json and
+  restart: a new setup code is printed.
+- Scripts (and Claude) use an API key, sent as `Authorization: Bearer <key>`: the API_KEY env var,
+  or keys made in Settings (stored only as a hash). They only open /api/ routes.
 
 Sessions are a signed cookie, valid 30 days.
 """
@@ -72,7 +72,89 @@ def _init_file():
 
 
 def is_set():
-    return bool(_load()["credentials"])
+    """True once any way to sign in exists (a passkey or a password)."""
+    d = _load()
+    return bool(d["credentials"] or (d.get("password") or {}).get("hash"))
+
+
+def has_password():
+    return bool((_load().get("password") or {}).get("hash"))
+
+
+# ---------- password ----------
+
+MIN_LEN = 10
+ITERATIONS = 300_000
+
+
+def _pw_hash(password, salt):
+    return hashlib.pbkdf2_hmac("sha256", password.encode(), salt, ITERATIONS)
+
+
+def set_password(password):
+    if len(password) < MIN_LEN:
+        raise ValueError(f"Use at least {MIN_LEN} characters.")
+    salt = secrets.token_bytes(16)
+    with _lock:
+        d = _init_file()
+        d["password"] = {"salt": salt.hex(), "hash": _pw_hash(password, salt).hex(), "set": time.time()}
+        _save(d)
+        _setup["code"] = ""
+    log.info("password set")
+
+
+def check_password(password):
+    p = _load().get("password") or {}
+    if not p.get("hash") or not password:
+        return False
+    return hmac.compare_digest(_pw_hash(password, bytes.fromhex(p["salt"])).hex(), p["hash"])
+
+
+def remove_password():
+    """Only allowed while a passkey exists, so there is always a way in."""
+    with _lock:
+        d = _load()
+        if not d["credentials"]:
+            return "Add a passkey before removing the password."
+        d.pop("password", None)
+        _save(d)
+    log.info("password removed")
+    return ""
+
+
+# ---------- API keys made in Settings ----------
+
+def _key_hash(key):
+    return hashlib.sha256(key.encode()).hexdigest()
+
+
+def api_keys():
+    return [{k: a.get(k) for k in ("id", "name", "prefix", "created", "last_used")} for a in _load().get("api_keys", [])]
+
+
+def create_api_key(name):
+    """Returns the new key. Only its hash is stored, so it can't be shown again."""
+    key = "cs_" + secrets.token_urlsafe(32)
+    with _lock:
+        d = _init_file()
+        d.setdefault("api_keys", []).append({
+            "id": secrets.token_hex(6), "name": (name or "API key").strip()[:60] or "API key",
+            "prefix": key[:7], "hash": _key_hash(key), "created": time.time(), "last_used": None})
+        _save(d)
+    log.info("API key created: %s", name)
+    return key
+
+
+def revoke_api_key(key_id):
+    with _lock:
+        d = _load()
+        before = len(d.get("api_keys", []))
+        d["api_keys"] = [a for a in d.get("api_keys", []) if a["id"] != key_id]
+        if len(d["api_keys"]) == before:
+            return "No such key."
+        _save(d)
+    log.info("API key revoked")
+    return ""
 
 
 def credentials():
@@ -189,11 +271,11 @@ def finish_login(body, origins, rp_id):
 
 
 def remove_credential(cred_id):
-    """Remove a passkey, but never the last one."""
+    """Remove a passkey, but never the last way to sign in."""
     with _lock:
         d = _load()
-        if len(d["credentials"]) <= 1:
-            return "You can't remove the last passkey."
+        if len(d["credentials"]) <= 1 and not (d.get("password") or {}).get("hash"):
+            return "You can't remove the last passkey while there's no password."
         before = len(d["credentials"])
         d["credentials"] = [c for c in d["credentials"] if c["id"] != cred_id]
         if len(d["credentials"]) == before:
@@ -236,7 +318,7 @@ def clear_cookie(secure=False):
 
 def logged_in(cookie_header):
     d = _load()
-    if not d.get("key") or not d["credentials"] or not cookie_header:
+    if not d.get("key") or not is_set() or not cookie_header:
         return False
     token = None
     for part in cookie_header.split(";"):
@@ -265,8 +347,22 @@ def logout_everywhere():
 
 
 def api_key_ok(auth_header):
-    """True for `Authorization: Bearer <API_KEY>`. No key configured = API keys are off."""
-    if len(API_KEY) < 20 or not auth_header:
+    """True for `Authorization: Bearer <key>` with the API_KEY env value or a key made in Settings."""
+    if not auth_header:
         return False
     scheme, _, value = auth_header.partition(" ")
-    return scheme.lower() == "bearer" and hmac.compare_digest(value.strip().encode(), API_KEY.encode())
+    value = value.strip()
+    if scheme.lower() != "bearer" or not value:
+        return False
+    if len(API_KEY) >= 20 and hmac.compare_digest(value.encode(), API_KEY.encode()):
+        return True
+    h = _key_hash(value)
+    with _lock:
+        d = _load()
+        for a in d.get("api_keys", []):
+            if hmac.compare_digest(a["hash"], h):
+                if not a.get("last_used") or time.time() - a["last_used"] > 300:
+                    a["last_used"] = time.time()       # written at most every 5 minutes
+                    _save(d)
+                return True
+    return False

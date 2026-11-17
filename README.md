@@ -10,7 +10,7 @@ A small self-hosted Docker container that keeps **Microsoft 365 (Outlook/Exchang
 
 ## What you get
 
-- A web page behind **passkey** sign-in, over HTTPS with the container's own certificate authority:
+- A web page behind **passkey or password** sign-in, over HTTPS with the container's own certificate authority:
   sign-in for both accounts, backups, the cleanup report, settings.
 - Nightly backup of both sides: raw API data (`.json.gz`, what a restore uses) plus a `.vcf` per side
   that any contacts app can import. Kept 30 days by default.
@@ -49,7 +49,7 @@ docker compose up -d --build
 
 1. Open `http://<server>:8080/cert`, download the certificate and install it as a trusted root on
    each device you'll use (steps for Windows, iPhone, Android and Mac are on that page).
-2. Open `https://<name in TLS_NAMES>:8443`. Create your passkey with the one-time **setup code**
+2. Open `https://<name in TLS_NAMES>:8443`. Create a passkey or a password with the one-time **setup code**
    from the container log (`docker logs contact-sync`).
 3. Sign in to each account from the dashboard:
 
@@ -62,8 +62,8 @@ Then click **Back up and build report now**.
 
 ### Sign-in and HTTPS
 
-- **Passkeys, no password.** The first passkey needs the setup code from the log; add more (one per
-  device) under Settings. Lost them all? Delete `data/auth.json` and restart; a new code is logged.
+- **Passkeys and/or a password.** The first one needs the setup code from the log; manage both (and
+  more passkeys, one per device) under Settings. Locked out? Delete `data/auth.json` and restart; a new code is logged.
 - **Private certificate authority.** On first start the container makes its own CA (10 years) and a
   site certificate from it (2 years, renewed automatically). The CA carries name constraints, so it
   can only vouch for the names in `TLS_NAMES`. Passkeys need a certificate the browser trusts,
@@ -71,8 +71,8 @@ Then click **Back up and build report now**.
   (`PUBLIC_HOST`, or the first dotted name in `TLS_NAMES`); other names redirect there.
 - Plain HTTP only redirects, except `/healthz` and the certificate download. To start over with a
   new CA, delete `data/tls/` and restart (then install the new one).
-- **API key** (`API_KEY`): `Authorization: Bearer <key>` on `/api/status`, `/api/report`,
-  `/api/backups`, `/api/setup-code` and `POST /api/run`.
+- **API keys**: make and revoke named keys under Settings (stored only as a hash), or set `API_KEY`. Send
+  `Authorization: Bearer <key>` to `/api/status`, `/api/report`, `/api/backups`, `/api/setup-code`, `POST /api/run`.
 
 On a macvlan network the container can take its address by DHCP and register its name with your
 router (`DHCP=1`, `DHCP_HOSTNAME`); see the comment at the top of `compose.yaml`.
@@ -80,7 +80,7 @@ router (`DHCP=1`, `DHCP_HOSTNAME`); see the comment at the top of `compose.yaml`
 ## Tests
 
 ```sh
-docker run --rm --entrypoint sh local/contact-sync:0.2.0 -c "python /tests/test_clean.py && python /tests/test_model.py && python /tests/test_webauthn.py"
+docker run --rm --entrypoint sh local/contact-sync:0.3.0 -c "python /tests/test_clean.py && python /tests/test_model.py && python /tests/test_webauthn.py && python /tests/test_access.py"
 ```
 
 Tests use made-up contacts only.
