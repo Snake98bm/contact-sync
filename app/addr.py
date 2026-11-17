@@ -249,7 +249,7 @@ def osm(a, timeout=20):
 
 
 def _name_words(s):
-    """The street's name alone: 'East Palm-ish Drive' and 'Palm-ish Dr' both -> ['palm-ish']."""
+    """The street's name alone: 'East Sample Grove Drive' and 'Sample Grove Dr' both -> ['sample', 'grove']."""
     drop = {"n", "s", "e", "w", "ne", "nw", "se", "sw"} | {_ABBR.get(t, t) for t in STREET_TYPES}
     return [w for w in _street_words(s) if w not in drop]
 
