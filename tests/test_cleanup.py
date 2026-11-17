@@ -231,9 +231,13 @@ def test_cleanup():
                                                                   "company": ""}}
     assert selected[sh["id"]] == {"mode": "strip", "people": [bob]}
     cleanup.state["log"] = []
-    cleanup._apply(plan["plan_id"], selected, None)
+    cleanup._apply(plan["plan_id"], selected, object())          # with a backup first: only the affected contacts
     log = "\n".join(cleanup.state["log"])
-    assert "✗" not in log, log
+    assert "✗" not in log and "Saving a copy of the" in log, log
+    import backup
+    import json as _json
+    info = _json.load(open(os.path.join(store.BACKUP_DIR, backup.listing()[0]["name"], "info.json")))
+    assert info["reason"] == "before cleanup" and info["contacts"] > 0 and "report.json" not in backup.listing()[0]["files"], info
     g = G["people/c-greg"]
     assert g["biographies"][0]["value"] == "Gate code 12", g["biographies"]
     assert [p["value"] for p in g["phoneNumbers"]] == ["(559) 555-1234"], g["phoneNumbers"]

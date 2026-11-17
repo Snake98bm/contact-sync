@@ -229,6 +229,21 @@ def test_suite_anywhere_is_the_same_place():
     assert k("1 Example St\nSpringfield") == k("1 Example St")
 
 
+def test_zip_from_other_contacts_in_a_one_zip_town():
+    real = net.request
+    net.request = lambda method, url, **kw: {"result": {"addressMatches": []}}     # Census doesn't know it
+    try:
+        known = [A("1 X", "Smallville", "CA", "90009"), A("2 Y", "Smallville", "CA", "90009"),
+                 A("3 Z", "Bigtown", "CA", "90010"), A("4 W", "Bigtown", "CA", "90011")]
+        cz = addr.city_zips(known)
+        a, how, ok = addr.fix(A("777 Example Lane", "Smallville", "CA", ""), city_zip=cz)
+        assert a["postal"] == "90009" and not ok and any("other contacts in Smallville" in h for h in how), (a, how)
+        a, how, ok = addr.fix(A("778 Example Lane", "Bigtown", "CA", ""), city_zip=cz)       # two ZIPs: no guess
+        assert not a["postal"]
+    finally:
+        net.request = real
+
+
 def test_street_differs():
     assert addr.street_differs("Suite K 47 S. Example Elm", "47 N Example Elms Dr")
     assert addr.street_differs("47 S Example Elms Dr", "47 N Example Elms Dr")

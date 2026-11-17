@@ -223,6 +223,18 @@ def street_differs(typed, census_street):
     return _street_words(typed) != _street_words(census_street)
 
 
+def city_zips(addresses):
+    """(city, state) -> ZIP, only for towns where all your contacts with a ZIP have the same one
+    (a small town; a city with several ZIPs gets no guess)."""
+    import collections
+    seen = collections.defaultdict(set)
+    for a in addresses:
+        z, c = (a.get("postal") or "").strip()[:5], (a.get("city") or "").strip().lower()
+        if re.fullmatch(r"\d{5}", z) and c:
+            seen[(c, state_code(a.get("region") or "") or zip_state(z))].add(z)
+    return {k: next(iter(v)) for k, v in seen.items() if len(v) == 1}
+
+
 def zip_cities(addresses):
     """ZIP -> the city most of your contacts with that ZIP have (to fill a missing city for a lookup)."""
     import collections
@@ -260,7 +272,7 @@ def _street_extras(a):
     return a, how, sure, bool(m)
 
 
-def fix(a, lookup=True, zip_city=None):
+def fix(a, lookup=True, zip_city=None, city_zip=None):
     """(fixed address, how, confident) — how: list of what was done."""
     a, how, confident, po_box = _street_extras(a)
     before = dict(a)
@@ -361,6 +373,13 @@ def fix(a, lookup=True, zip_city=None):
         elif needs_lookup(a):
             how.append("no match found: fill in by hand if you like")
             confident = False
+    # still no ZIP: if every other contact in this town has the same one, suggest it (to check)
+    town = ((a.get("city") or "").strip().lower(), state_code(a.get("region") or ""))
+    if (a.get("street") or "").strip() and not (a.get("postal") or "").strip() and (city_zip or {}).get(town):
+        a["postal"] = city_zip[town]
+        how.append(f"ZIP {a['postal']} from your other contacts in {a['city'].strip()} (the only ZIP they have "
+                   "there): check it")
+        confident = False
     if (a.get("street") or "").strip() and not all((a.get(k) or "").strip() for k in ("city", "region", "postal")):
         confident = False                            # still incomplete: let the owner look first
     return a, how, confident

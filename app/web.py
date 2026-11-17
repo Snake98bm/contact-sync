@@ -1184,9 +1184,15 @@ def cleanup_page(plan, st, write_mode, msg="", error=""):
         return page("Cleanup", "/cleanup", "".join(b))
     if st["running"]:
         pct = int(100 * st["done"] / max(st["total"], 1))
-        b.append(f'<div class="banner" id="prog">Working: {st["done"]} of {st["total"]} ({pct}%) — {esc(st["step"])}</div>'
-                 '<ul class="small">' + "".join(f"<li>{esc(x)}</li>" for x in st["log"][-15:]) + "</ul>"
-                 "<script>setTimeout(()=>location.reload(),4000)</script>")
+        now = list((st.get("now") or {}).values())
+        doing = (f"<p class='small'><b>Working on now:</b></p><ul class='small'>"
+                 + "".join(f"<li>{esc(x)}</li>" for x in now) + "</ul>") if now else \
+            f"<p class='small'><b>Now:</b> {esc(st['step'])}</p>"
+        b.append(f'<div class="banner" id="prog">Working: {st["done"]} of {st["total"]} done ({pct}%). '
+                 'This page refreshes by itself.</div>' + doing
+                 + "<p class='small'><b>Done so far</b> (newest first):</p><ul class='small'>"
+                 + "".join(f"<li>{esc(x)}</li>" for x in reversed(st["log"][-25:])) + "</ul>"
+                 "<script>setTimeout(()=>location.reload(),3000)</script>")
         return page("Cleanup", "/cleanup", "".join(b))
     build = ('<form method="post" action="/cleanup/plan" class="inline"><button class="ghost">'
              + ("Rebuild the plan from the accounts now" if plan else "Build the cleanup plan") + "</button></form>")

@@ -47,6 +47,8 @@ CREATE TABLE IF NOT EXISTS shared_ok(kind TEXT, value TEXT, people TEXT, ts REAL
 def _people_key(names):
     return " | ".join(sorted({(n or "").strip().lower() for n in names}))
 
+WHAT = {"tidy": "Tidying", "address": "Fixing the address of", "combine": "Combining", "shared": "Shared number/email:",
+        "copy": "Copying", "label": "Google label", "category": "Outlook category"}
 state = {"running": False, "step": "", "done": 0, "total": 0, "log": [], "plan_id": None,
          "building": False, "build_step": "", "build_error": ""}
 _lock = threading.Lock()
@@ -283,6 +285,7 @@ def build_plan(progress=None):
     lookup = bool(store.load_settings().get("address_lookup", True))
     n_people = len(rep["people"])
     zip_city = addr.zip_cities([a for c in contacts for a in c.get("addr") or []])
+    city_zip = addr.city_zips([a for c in contacts for a in c.get("addr") or []])
     for n_done, p in enumerate(rep["people"], 1):
         if n_done % 10 == 1:
             say(f"Checking addresses ({n_done} of {n_people} people)")
@@ -298,7 +301,7 @@ def build_plan(progress=None):
         rows = {}          # fixed address -> one row, even when the copies typed it differently
         for skey, g in seen_addr.items():
             a = g["addr"]
-            after, how, confident = addr.fix(a, lookup=lookup, zip_city=zip_city)
+            after, how, confident = addr.fix(a, lookup=lookup, zip_city=zip_city, city_zip=city_zip)
             changed = any((after.get(x) or "") != (a.get(x) or "") for x in ("street", "city", "region", "postal", "country"))
             missing = [x for x in ("street", "city", "region", "postal") if not (after.get(x) or "").strip()]
             if not changed and not missing:
@@ -412,7 +415,7 @@ def start_apply(plan_id, selected, backup_runner=None):
     with _lock:
         if state["running"]:
             return False
-        state.update(running=True, step="Starting", done=0, total=len(selected), log=[], plan_id=plan_id)
+        state.update(running=True, step="Starting", done=0, total=len(selected), log=[], plan_id=plan_id, now={})
     threading.Thread(target=_apply, args=(plan_id, _choices(selected), backup_runner), daemon=True).start()
     return True
 
@@ -445,6 +448,28 @@ def _groups(items):
     return list(out.values())
 
 
+def _backup_affected(items):
+    """Before changing anything, save a copy of just the contacts these items touch (a small backup on the
+    Backups page), not the whole accounts. Every change also keeps its own before-copy in the history,
+    and deletes go to the recycle bin with their photos."""
+    import backup
+    who = {(m["side"], m["id"]): m for i in items for m in (i.get("members") or []) + (i.get("person") or [])}
+    state["step"] = f"Saving a copy of the {len(who)} contacts being changed"
+    _say(f"Saving a copy of the {len(who)} contacts being changed (Backups page)")
+
+    def get(m):
+        try:
+            return m["side"], *writer._fresh(m)
+        except Exception:
+            return None                                  # already gone: nothing to keep
+    got = [g for g in par.run_all(get, list(who.values())) if g]
+    if who and not got:
+        raise RuntimeError("Couldn't read the contacts to back them up, so nothing was changed.")
+    name = backup.save([raw for s, raw, _ in got if s == "microsoft"], [raw for s, raw, _ in got if s == "google"],
+                       [c for _, _, c in got], extra={"reason": "before cleanup", "contacts": len(got)})
+    _say(f"Saved {len(got)} contacts to backup {name}; now making the changes")
+
+
 def _apply(plan_id, selected, backup_runner):
     selected = _choices(selected)
     region = store.load_settings().get("default_region", "US")
@@ -463,19 +488,14 @@ def _apply(plan_id, selected, backup_runner):
         row = store.q("SELECT * FROM cleanup_plans WHERE id=?", (plan_id,))[0]
         items = [dict(i, choice=selected[i["id"]]) for i in json.loads(row["plan"])["items"] if i["id"] in selected]
         if backup_runner is not None:
-            state["step"] = "Taking a backup first"
-            backup_runner.start("before cleanup")
-            time.sleep(1)
-            while backup_runner.progress["running"]:
-                time.sleep(1)
-            if backup_runner.progress.get("error"):
-                raise RuntimeError("The backup failed, so nothing was changed: " + backup_runner.progress["error"])
+            _backup_affected(items)
         names = {}
         tally = threading.Lock()
 
         def one(i):
             nonlocal ok, failed, skipped
             state["step"] = f"{i['kind']}: {i['title']}"
+            state.setdefault("now", {})[i["id"]] = f"{WHAT.get(i['kind'], i['kind'])} {i['title']}"
             outcome = "skipped"
             try:
                 result = {"tidy": _do_tidy, "address": _do_address, "combine": _do_combine, "shared": _do_shared, "copy": _do_copy,
@@ -494,6 +514,7 @@ def _apply(plan_id, selected, backup_runner):
                 failed += outcome == "failed"
                 skipped += outcome == "skipped"
                 state["done"] += 1
+            state["now"].pop(i["id"], None)
             time.sleep(PAUSE)
 
         # items that touch the same contact run in order, in one worker; different people run at once
