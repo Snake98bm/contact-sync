@@ -3,17 +3,36 @@
 A small self-hosted Docker container that keeps **Microsoft 365 (Outlook/Exchange) contacts** and
 **Google Contacts** in step, after cleaning them up first.
 
-> **Status: 0.1, read-only.** This version signs in to both accounts, takes a full backup and
-> builds a cleanup report (duplicates, possible matches, junk, phone/name formatting, notes left
-> behind by older sync tools). It **cannot change either account**: every request other than a
-> read or a sign-in is refused in code (`app/net.py`). Cleanup and two-way sync come next.
+> **Status: 0.13.** Backup, a one-time cleanup you review and approve, and two-way sync are all
+> working. Nothing is written until **write mode** is switched on in Settings, and every change keeps
+> a copy first (contact history, recycle bin), so it can be undone. Only the contact calls listed in
+> `app/net.py` can write; everything else is refused in code.
 
 ## What you get
 
 - A web page behind **passkey or password** sign-in, over HTTPS with the container's own certificate authority:
-  sign-in for both accounts, backups, the cleanup report, settings.
-- Nightly backup of both sides: raw API data (`.json.gz`, what a restore uses) plus a `.vcf` per side
-  that any contacts app can import. Kept 30 days by default.
+  sign-in for both accounts, contacts, cleanup, sync, recycle bin, backups, settings.
+- **Cleanup** (build a plan, tick what you want, apply). Nothing changes until you press Apply.
+  - **Tidy:** "Last, First" names, phone formatting, lowercase emails, notes and repeated addresses
+    left behind by older sync tools.
+  - **Combine** duplicates and link the copies in each account.
+  - **Shared phones and emails:** decide per household; you can mark a number as rightly shared.
+  - **Fix addresses:**
+    - split an address typed into the street box into street, city, state and ZIP
+    - fill a missing state from the ZIP
+    - look up a missing ZIP or city: first the US Census Bureau geocoder, then OpenStreetMap
+      (only the street line, city and state are sent; see [PRIVACY.md](PRIVACY.md))
+    - correct a wrong ZIP or a jumbled or misspelled street
+    - offer the ZIP your other contacts in a one-ZIP town have
+    - treat the same address typed two ways as one
+  - Unsure fixes are shown in yellow to check. Every address can be edited, removed, or its whole
+    contact sent to the recycle bin.
+  - Before applying, the contacts being changed are backed up. Up to 10 contacts are changed at once.
+- **Two-way sync** every hour: the newest edit wins field by field, with a conflict log. Deletes
+  carry over to the other account and go to the recycle bin (kept 2 years, photos included). More
+  than 10 deletes in one run wait for your OK.
+- **Nightly backup** of both sides: raw API data (`.json.gz`, what a restore uses), photos, and a
+  `.vcf` per side that any contacts app can import. Kept 30 days by default.
 - An optional API key for scripts (`/api/status`, `/api/report`, `/api/backups`, `POST /api/run`).
 - No dependencies beyond the Python standard library.
 
@@ -80,7 +99,7 @@ router (`DHCP=1`, `DHCP_HOSTNAME`); see the comment at the top of `compose.yaml`
 ## Tests
 
 ```sh
-docker run --rm --entrypoint sh local/contact-sync:0.13.10 -c "python /tests/test_clean.py && python /tests/test_model.py && python /tests/test_webauthn.py && python /tests/test_access.py && python /tests/test_writer.py && python /tests/test_sync.py && python /tests/test_cleanup.py && python /tests/test_addr.py && python /tests/test_pages.py"
+docker run --rm --entrypoint sh local/contact-sync:0.13.11 -c "python /tests/test_clean.py && python /tests/test_model.py && python /tests/test_webauthn.py && python /tests/test_access.py && python /tests/test_writer.py && python /tests/test_sync.py && python /tests/test_cleanup.py && python /tests/test_addr.py && python /tests/test_pages.py"
 ```
 
 Tests use made-up contacts only.

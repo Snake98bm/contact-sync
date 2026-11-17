@@ -164,6 +164,22 @@ def test_cleanup_rows_show_the_card():
     assert "Address (Work)" in h and "Springfeld" in h and "a note" in h
 
 
+def test_phone_rows_on_the_edit_page():
+    rec = {"given": "Jane", "family": "Example", "phones": [{"value": "(555) 555-0100", "type": "mobile"},
+                                                            {"value": "(555) 555-0101", "type": "main"}]}
+    p = {"key": "abcdef012345", "members": [{"side": "google", "id": "g1"}], "name": "Jane Example"}
+    h = web.contact_edit_page(p, rec, write_mode="on")
+    assert 'name="phone_0_num" value="(555) 555-0100"' in h and 'name="phone_2_num" value=""' in h, h[:200]
+    assert '<option value="custom" selected>' in h and 'value="main"' in h and "Add a phone" in h
+    form = {"given": "Jane", "family": "Example", "phone_0_num": "(555) 555-0100", "phone_0_type": "home",
+            "phone_1_num": "(555) 555-0101", "phone_1_type": "custom", "phone_1_custom": "Main",
+            "phone_2_num": "", "phone_2_type": "mobile", "phone_3_num": "(555) 555-0102", "phone_3_type": "work"}
+    got = web.parse_edit_form(form.get)["phones"]
+    assert got == [{"value": "(555) 555-0100", "type": "home"}, {"value": "(555) 555-0101", "type": "main"},
+                   {"value": "(555) 555-0102", "type": "work"}], got
+    assert web.parse_edit_form({"given": "J", "phones": "(555) 555-0100 | home"}.get)["phones"][0]["type"] == "home"
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

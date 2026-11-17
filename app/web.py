@@ -717,13 +717,38 @@ def contact_page(p, r, history=(), msg="", error="", write_mode="off"):
 
 
 PHONE_TYPES = ("mobile", "home", "work", "main", "other")
+MAIN_PHONE_TYPES = ("mobile", "home", "work", "other")       # the menu; anything else is an "Other label"
+SELECT_STYLE = "padding:7px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--text)"
+
+
+def _phone_row(k, value="", typ="mobile"):
+    """One phone: number, a Mobile/Home/Work/Other menu, and a box for any other label (Google allows them)."""
+    custom = typ not in MAIN_PHONE_TYPES
+    opts = "".join(f'<option value="{t}"{" selected" if t == typ else ""}>{t.title()}</option>'
+                   for t in MAIN_PHONE_TYPES)
+    opts += f'<option value="custom"{" selected" if custom else ""}>Other label…</option>'
+    show = "this.nextElementSibling.style.display=this.value==='custom'?'':'none'"
+    return (f'<div class="bar phone-row" style="margin:4px 0"><input type="text" name="phone_{k}_num" '
+            f'value="{esc(value)}" placeholder="(559) 555-1234" style="width:180px">'
+            f'<select name="phone_{k}_type" style="{SELECT_STYLE}" onchange="{show}">{opts}</select>'
+            f'<input type="text" name="phone_{k}_custom" value="{esc(typ if custom else "")}" '
+            f'placeholder="label, e.g. main" style="width:140px{"" if custom else ";display:none"}"></div>')
+
+
+ADD_PHONE_JS = """<script>function addPhone(){
+const d=document.getElementById('phones'),k=d.children.length,t=d.lastElementChild.cloneNode(true);
+t.querySelectorAll('input,select').forEach(e=>{e.name=e.name.replace(/phone_[0-9]+_/,'phone_'+k+'_');
+if(e.tagName==='SELECT'){e.value='mobile'}else{e.value=''}});
+t.querySelector('[name$=_custom]').style.display='none';d.appendChild(t);return false}</script>"""
 
 
 def contact_edit_page(p, rec, error="", write_mode="test"):
     def v(k):
         return esc(rec.get(k) or "")
     key = esc(p["key"])
-    phones = "\n".join(f"{x['value']} | {x.get('type') or 'other'}" for x in rec.get("phones") or [])
+    plist = list(rec.get("phones") or [])
+    phone_rows = "".join(_phone_row(k, x.get("value", ""), (x.get("type") or "mobile").lower())
+                         for k, x in enumerate(plist + [{}] * (1 if plist else 2)))
     emails = "\n".join(rec.get("emails") or [])
     by_type = {a.get("type"): a for a in rec.get("addr") or []}
     addr_html = ""
@@ -752,8 +777,10 @@ def contact_edit_page(p, rec, error="", write_mode="test"):
         f'<div><label>Job title</label><input type="text" name="title" value="{v("title")}" style="width:220px"></div></div>'
         f'<label>Emails</label><textarea name="emails" rows="3" style="width:100%;max-width:480px">{esc(emails)}</textarea>'
         f'<div class="hint">One per line. Outlook keeps up to 3.</div>'
-        f'<label>Phones</label><textarea name="phones" rows="4" style="width:100%;max-width:480px">{esc(phones)}</textarea>'
-        f'<div class="hint">One per line as <code>number | type</code>; type is usually one of {", ".join(PHONE_TYPES)} (other labels are kept).</div>'
+        f'<label>Phones</label><div id="phones">{phone_rows}</div>'
+        '<p style="margin:4px 0"><a href="#" onclick="return addPhone()">+ Add a phone</a></p>'
+        '<div class="hint">Leave a number empty to remove it. “Other label…” keeps any label Google has '
+        '(Outlook files those under Business).</div>' + ADD_PHONE_JS +
         f'<div class="grid2" style="margin-top:14px">{addr_html}</div>'
         f'<label>Birthday</label><input type="text" name="birthday" value="{v("birthday")}" placeholder="YYYY-MM-DD or --MM-DD">'
         f'<label>Notes</label><textarea name="notes" rows="6" style="width:100%">{v("notes")}</textarea>'
@@ -779,7 +806,17 @@ def parse_edit_form(f, validate=True):
         if "@" not in e or " " in e:
             bad(f"“{e}” doesn't look like an email address.")
     rec["phones"] = []
-    for line in (f("phones") or "").splitlines():
+    for k in range(60):                                  # the phone rows: number + type (+ any other label)
+        num = (f(f"phone_{k}_num") or "").strip()
+        if not num:
+            continue
+        typ = (f(f"phone_{k}_type") or "mobile").strip().lower()
+        if typ == "custom":
+            typ = (f(f"phone_{k}_custom") or "").strip().lower() or "other"
+        if not re.fullmatch(r"[a-z][a-z0-9 \-]{0,29}", typ):
+            bad(f"Phone label “{typ}” should be a short word.")
+        rec["phones"].append({"value": num, "type": typ})
+    for line in (f("phones") or "").splitlines():       # the older one-box form (number | type), still accepted
         if not line.strip():
             continue
         num, _, typ = line.partition("|")
