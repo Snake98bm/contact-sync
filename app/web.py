@@ -532,15 +532,79 @@ def _match(p, q):
     return all(w in hay.lower() for w in q.lower().split())
 
 
-def contacts_page(r, q="", show=""):
+CONTACT_FILTERS = [
+    ("", "Everyone"),
+    ("both", "In both accounts"),
+    ("one", "Only in one account"),
+    ("dup", "Duplicates"),
+    ("no_phone", "No phone"),
+    ("no_email", "No email"),
+    ("no_addr", "No address"),
+    ("addr_gaps", "Address missing city, state or ZIP"),
+    ("notes", "Has notes"),
+    ("differ", "Copies differ"),
+    ("recent", "Changed in the last 30 days"),
+]
+CONTACT_SORTS = [("name", "Name A–Z"), ("name_desc", "Name Z–A"), ("last", "Last name A–Z"),
+                 ("company", "Company"), ("recent", "Recently changed")]
+
+
+def _p_updated(p):
+    return max((c.get("updated") or "" for c in p["members"]), default="")
+
+
+def _p_filter(p, show):
+    cs = p["members"]
+    if show == "both":
+        return bool(p["ms"] and p["google"])
+    if show == "one":
+        return not (p["ms"] and p["google"])
+    if show == "dup":
+        return p["ms"] > 1 or p["google"] > 1
+    if show == "no_phone":
+        return not any(c["phones"] for c in cs)
+    if show == "no_email":
+        return not any(c["emails"] for c in cs)
+    if show == "no_addr":
+        return not any(c.get("addr") or c.get("addresses") for c in cs)
+    if show == "addr_gaps":
+        return any(not (a.get("city") and a.get("region") and a.get("postal")) for c in cs for a in c.get("addr") or [])
+    if show == "notes":
+        return any((c.get("notes") or "").strip() for c in cs)
+    if show == "differ":
+        if len(cs) < 2:
+            return False
+        norm = lambda c: (c["name"].lower(), sorted(e.lower() for e in c["emails"]),
+                          sorted("".join(ch for ch in x["value"] if ch.isdigit())[-10:] for x in c["phones"]),
+                          " ".join((c.get("notes") or "").split()), sorted(a.lower() for a in c.get("addresses") or []))
+        return len({repr(norm(c)) for c in cs}) > 1
+    if show == "recent":
+        cutoff = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() - 30 * 86400))
+        return _p_updated(p) >= cutoff
+    return True
+
+
+def _p_sort_key(sort):
+    if sort == "last":
+        return lambda p: ((next((c["family"] for c in p["members"] if c.get("family")), "") or p["name"] or "~").lower(),
+                          (p["name"] or "").lower())
+    if sort == "company":
+        return lambda p: ((next((c["company"] for c in p["members"] if c.get("company")), "") or "~").lower(),
+                          (p["name"] or "").lower())
+    return lambda p: (p["name"] or "~").lower()
+
+
+def contacts_page(r, q="", show="", group="", sort="name"):
     if not r or "people" not in r:
         return page("Contacts", "/contacts", "<h1>Contacts</h1><p class='muted'>No backup with contact data yet. "
                     "Run <b>Back up and build report now</b> on the dashboard.</p>")
-    people = [p for p in r["people"] if _match(p, q)]
-    if show == "one":
-        people = [p for p in people if not (p["ms"] and p["google"])]
-    elif show == "dup":
-        people = [p for p in people if p["ms"] > 1 or p["google"] > 1]
+    people = [p for p in r["people"] if _match(p, q) and _p_filter(p, show)]
+    if group:
+        people = [p for p in people if any(group in c.get("groups") or [] for c in p["members"])]
+    if sort == "recent":
+        people.sort(key=_p_updated, reverse=True)
+    else:
+        people.sort(key=_p_sort_key(sort), reverse=(sort == "name_desc"))
     rows = []
     for p in people[:1000]:
         c0 = p["members"][0]
@@ -550,21 +614,32 @@ def contacts_page(r, q="", show=""):
             for x in c["phones"]:
                 if x["value"] not in phones:
                     phones.append(x["value"])
+        changed = _p_updated(p)[:10]
         rows.append(f"<tr><td><a href='/contacts/{esc(p['key'])}'>{esc(p['name'] or '(no name)')}</a>"
                     f"<div class='muted small'>{esc(c0['company'])}</div></td>"
                     f"<td class='small'>{'<br>'.join(esc(e) for e in emails[:2])}</td>"
-                    f"<td class='small num'>{'<br>'.join(esc(x) for x in phones[:2])}</td><td>{_status(p)}</td></tr>")
-    sel = lambda v: " selected" if show == v else ""
-    body = f"""<h1>Contacts</h1>
-<p class="sub">From the backup of {when(r.get('created'))}.
-</p>
-<form method="get" action="/contacts" class="bar"><input type="text" name="q" value="{esc(q)}" class="wide"
-style="max-width:360px" placeholder="Search name, company, email or phone" autofocus>
-<select name="show" style="padding:7px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--text)">
-<option value="">Everyone</option><option value="one"{sel('one')}>Only on one side</option>
-<option value="dup"{sel('dup')}>Duplicates</option></select><button>Search</button></form>
-<p class="muted small">{len(people)} of {len(r['people'])} people</p>
-<div class="card"><table><tr><th>Name</th><th>Email</th><th>Phone</th><th>In</th></tr>{''.join(rows)}</table></div>"""
+                    f"<td class='small num'>{'<br>'.join(esc(x) for x in phones[:2])}</td>"
+                    f"<td class='small num'>{esc(changed)}</td><td>{_status(p)}</td></tr>")
+    style = "padding:7px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--text)"
+    opt = lambda v, name, cur: f"<option value='{esc(v)}'{' selected' if cur == v else ''}>{esc(name)}</option>"
+    groups = [g for g, _ in r.get("groups") or []]
+    group_sel = ""
+    if groups:
+        group_sel = (f"<select name='group' style='{style}'>" + opt("", "Any label or category", group)
+                     + "".join(opt(g, g, group) for g in groups) + "</select>")
+    form = (f"<form method='get' action='/contacts' class='bar'><input type='text' name='q' value='{esc(q)}' class='wide' "
+            f"style='max-width:320px' placeholder='Search name, company, email or phone' autofocus>"
+            f"<select name='show' style='{style}'>" + "".join(opt(v, n, show) for v, n in CONTACT_FILTERS) + "</select>"
+            + group_sel
+            + f"<select name='sort' style='{style}'>" + "".join(opt(v, n, sort) for v, n in CONTACT_SORTS) + "</select>"
+            "<button>Show</button>" + ("<a href='/contacts'>clear</a>" if q or show or group or sort != "name" else "")
+            + "</form>")
+    body = (f"<h1>Contacts</h1><p class='sub'>From the backup of {when(r.get('created'))}, kept up to date as you edit. "
+            f"Click a name to see both copies, edit or delete.</p>{form}"
+            f"<p class='muted small'>{len(people)} of {len(r['people'])} people"
+            + (" (showing the first 1000)" if len(people) > 1000 else "") + "</p>"
+            "<div class='card'><table><tr><th>Name</th><th>Email</th><th>Phone</th><th>Changed</th><th>In</th></tr>"
+            + "".join(rows) + "</table></div>")
     return page("Contacts", "/contacts", body)
 
 
@@ -726,14 +801,59 @@ def parse_edit_form(f, validate=True):
     return rec
 
 
-def bin_page(items, msg="", error="", write_mode="off"):
+def _bin_copies(it):
+    """The saved copies of a recycle-bin entry in the common shape (import here: web stays light)."""
+    import model
+    out = [model.from_graph(r) for r in json.loads(it["ms_raw"] or "[]")]
+    out += [model.from_people(r, {}) for r in json.loads(it["g_raw"] or "[]")]
+    return out
+
+
+def _bin_text(it):
+    """Everything searchable about a bin entry."""
+    bits = [it["name"] or "", it.get("reason") or ""]
+    for c in _bin_copies(it):
+        bits += [c["name"], c["company"], " ".join(c["emails"]), " ".join(p["value"] for p in c["phones"])]
+    return " ".join(bits)
+
+
+def bin_page(items, msg="", error="", write_mode="off", q="", show="", sort="new"):
+    total = len(items)
+    if q:
+        digits = "".join(ch for ch in q if ch.isdigit())
+        def hit(it):
+            text = _bin_text(it)
+            if len(digits) >= 4 and digits in "".join(ch for ch in text if ch.isdigit()):
+                return True
+            return all(w in text.lower() for w in q.lower().split())
+        items = [it for it in items if hit(it)]
+    has = lambda it, k: bool(json.loads(it[k] or "[]"))
+    filters = {
+        "waiting": lambda it: not it["restored"], "restored": lambda it: bool(it["restored"]),
+        "both": lambda it: has(it, "ms_raw") and has(it, "g_raw"),
+        "one": lambda it: has(it, "ms_raw") != has(it, "g_raw"),
+        "photo": lambda it: bool(it.get("has_photo")),
+        "sync": lambda it: (it.get("reason") or "").startswith("Sync"),
+        "cleanup": lambda it: (it.get("reason") or "").startswith("Cleanup"),
+        "page": lambda it: (it.get("reason") or "").startswith("Deleted from"),
+    }
+    if show in filters:
+        items = [it for it in items if filters[show](it)]
+    sorts = {"new": (lambda it: -it["ts"]), "old": (lambda it: it["ts"]),
+             "name": (lambda it: (it["name"] or "").lower()), "name_desc": None}
+    if sort == "name_desc":
+        items = sorted(items, key=lambda it: (it["name"] or "").lower(), reverse=True)
+    else:
+        items = sorted(items, key=sorts.get(sort) or sorts["new"])
     rows = []
     for it in items:
         sides = []
-        if json.loads(it["ms_raw"] or "[]"):
+        if has(it, "ms_raw"):
             sides.append(pill(*SIDE["microsoft"]))
-        if json.loads(it["g_raw"] or "[]"):
+        if has(it, "g_raw"):
             sides.append(pill(*SIDE["google"]))
+        if it.get("has_photo"):
+            sides.append(pill("photo", "mute"))
         if it["restored"]:
             act = f"<span class='muted small'>Restored {when(it['restored'])}</span>"
         elif write_mode == "off":
@@ -741,15 +861,68 @@ def bin_page(items, msg="", error="", write_mode="off"):
         else:
             act = (f"<form method='post' action='/bin/{it['id']}/restore' class='inline'>"
                    f"<button class='ghost'>Restore to both</button></form>")
-        rows.append(f"<tr><td>{esc(it['name'])}</td><td class='num'>{when(it['ts'])}</td><td>{' '.join(sides)}</td>"
-                    f"<td>{act}</td></tr>")
+        rows.append(f"<tr><td><a href='/bin/{it['id']}'>{esc(it['name'])}</a>"
+                    f"<div class='muted small'>{esc(it.get('reason') or '')}</div></td>"
+                    f"<td class='num'>{when(it['ts'])}</td><td>{' '.join(sides)}</td><td>{act}</td></tr>")
+    sel = lambda name, v, cur: f"<option value='{v}'{' selected' if cur == v else ''}>{name}</option>"
+    style = "padding:7px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--text)"
+    form = (f"<form method='get' action='/bin' class='bar' style='margin:10px 0'>"
+            f"<input type='text' name='q' value='{esc(q)}' placeholder='Search name, company, email, phone or reason' "
+            f"style='max-width:340px' class='wide'>"
+            f"<select name='show' style='{style}'>" + sel("Everything", "", show) + sel("Not restored", "waiting", show)
+            + sel("Restored", "restored", show) + sel("Had copies in both", "both", show)
+            + sel("Only in one account", "one", show) + sel("With a photo", "photo", show)
+            + sel("Deleted by the sync", "sync", show) + sel("Removed by the cleanup", "cleanup", show)
+            + sel("Deleted from the Contacts page", "page", show) + "</select>"
+            f"<select name='sort' style='{style}'>" + sel("Newest first", "new", sort) + sel("Oldest first", "old", sort)
+            + sel("Name A–Z", "name", sort) + sel("Name Z–A", "name_desc", sort) + "</select>"
+            "<button>Show</button>" + ("<a href='/bin'>clear</a>" if q or show or sort != "new" else "") + "</form>")
     body = ("<h1>Recycle bin</h1><p class='sub'>Contacts deleted through contact-sync, with both sides' data. Kept 2 "
-            "years. Restoring creates the contact again in Microsoft 365 and Google (everything, the photo and "
-            "labels included, comes back as it was).</p>"
+            "years. Click a name to see everything that was saved. Restoring creates the contact again in Microsoft "
+            "365 and Google (everything, the photo and labels included, comes back as it was).</p>"
             + (f'<div class="banner">{esc(msg)}</div>' if msg else "")
             + (f'<div class="banner err">{esc(error)}</div>' if error else "")
+            + form + f"<p class='muted small'>{len(items)} of {total}</p>"
             + _section("items", "Deleted contacts", "", rows, ["Name", "Deleted", "Had copies in", ""]))
     return page("Recycle bin", "/bin", body)
+
+
+def bin_detail_page(it, write_mode="off"):
+    cols = _bin_copies(it)
+    head = "".join(f"<th>{pill(*SIDE[c['side']])}</th>" for c in cols)
+    photos = ""
+    for side, key in (("microsoft", "ms_photo"), ("google", "g_photo")):
+        if it.get(key):
+            import base64 as _b
+            data = _b.b64decode(it[key])
+            ctype = "image/png" if data[:4] == b"\x89PNG" else "image/jpeg"
+            photos += (f"<figure style='display:inline-block;margin:0 16px 0 0;text-align:center'>"
+                       f"<img src='data:{ctype};base64,{it[key]}' alt='' style='width:120px;height:120px;"
+                       f"object-fit:cover;border-radius:12px;border:1px solid var(--line)'>"
+                       f"<figcaption>{pill(*SIDE[side])}</figcaption></figure>")
+    rows = []
+    for label, get in FIELDS:
+        vals = [get(c) or "" for c in cols]
+        if not any(vals):
+            continue
+        differ = len(cols) > 1 and len({" ".join(v.lower().split()) for v in vals}) > 1
+        cls = ' class="diff"' if differ else ""
+        rows.append(f"<tr><th style='text-transform:none;font-size:13px'>{esc(label)}</th>"
+                    + "".join(f"<td style='white-space:pre-wrap'{cls}>{esc(v)}</td>" for v in vals) + "</tr>")
+    if it["restored"]:
+        act = f"<p class='muted'>Restored {when(it['restored'])}.</p>"
+    elif write_mode == "off":
+        act = "<p class='muted'>Writing is off (Settings → Write mode).</p>"
+    else:
+        act = (f"<form method='post' action='/bin/{it['id']}/restore'><button>Restore to both</button></form>")
+    body = (f"<p><a href='/bin'>← Recycle bin</a></p><h1>{esc(it['name'])}</h1>"
+            f"<p class='sub'>Deleted {when(it['ts'])}" + (f" · {esc(it.get('reason'))}" if it.get("reason") else "")
+            + "</p>" + (f"<div style='margin:12px 0'>{photos}</div>" if photos else "") + act
+            + (f"<div class='card'><table><tr><th></th>{head}</tr>{''.join(rows)}</table></div>" if cols else
+               "<p class='muted'>No saved data.</p>")
+            + "<p class='muted small'>This is the copy saved when it was deleted. Fields that differ between the two "
+              "accounts are highlighted.</p><style>td.diff{background:var(--warnbg)}</style>")
+    return page(it["name"] or "Deleted contact", "/bin", body)
 
 
 # ---------- sync ----------

@@ -34,6 +34,29 @@ class Runner:
         self.progress["step"] = text
         log.info(text)
 
+    def _photos(self, raw_ms, raw_g):
+        """Every contact's own photo, base64, by side and id (Outlook needs one read per contact)."""
+        import base64
+        import writer
+        out = {"microsoft": {}, "google": {}}
+        if raw_g:
+            people = [p for p in raw_g["people"] if google.photo_url(p)]
+            for n, p in enumerate(people, 1):
+                self._step(f"Saving photos (Google {n} of {len(people)})")
+                data = writer.get_photo("google", p["resourceName"], p)
+                if data:
+                    out["google"][p["resourceName"]] = base64.b64encode(data).decode()
+        if raw_ms:
+            items = raw_ms["contacts"]
+            for n, c in enumerate(items, 1):
+                if n % 25 == 1:
+                    self._step(f"Saving photos (Microsoft 365 {n} of {len(items)})")
+                data = writer.get_photo("microsoft", c["id"])
+                if data:
+                    out["microsoft"][c["id"]] = base64.b64encode(data).decode()
+        log.info("photos saved: %d Microsoft 365, %d Google", len(out["microsoft"]), len(out["google"]))
+        return out
+
     def apply_change(self, removed=(), upserted=()):
         """After a write: update the in-memory report from the raw replies the write already got,
         instead of downloading every contact again. removed = [(side, id)], upserted = [(side, raw)]."""
@@ -77,8 +100,11 @@ class Runner:
                 notes.append("Google not signed in: skipped")
             if raw_ms is None and raw_g is None:
                 raise RuntimeError("Sign in to at least one account first.")
+            photos = None
+            if settings.get("backup_photos", True):
+                photos = self._photos(raw_ms, raw_g)
             self._step("Saving the backup")
-            name = backup.save(raw_ms, raw_g, contacts, {"trigger": trigger, "notes": notes})
+            name = backup.save(raw_ms, raw_g, contacts, {"trigger": trigger, "notes": notes}, photos)
             self._step("Building the cleanup report")
             report = clean.analyse(contacts, settings.get("default_region", "US"))
             report["created"] = time.time()

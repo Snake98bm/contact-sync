@@ -419,7 +419,32 @@ def history(ids):
 
 
 def bin_items():
-    return store.q("SELECT id, ts, name, restored, note, ms_raw, g_raw FROM bin ORDER BY id DESC")
+    rows = store.q("SELECT id, ts, name, restored, note, ms_raw, g_raw, "
+                   "(ms_photo IS NOT NULL OR g_photo IS NOT NULL) AS has_photo FROM bin ORDER BY id DESC")
+    reasons = bin_reasons()
+    for r in rows:
+        r["reason"] = reasons.get(r["id"], "")
+    return rows
+
+
+def bin_item(bin_id):
+    row = (store.q("SELECT * FROM bin WHERE id=?", (bin_id,)) or [None])[0]
+    if row:
+        row["reason"] = bin_reasons().get(row["id"], "")
+    return row
+
+
+def bin_reasons():
+    """bin id -> why it was deleted (deleted from the page, by the sync, merged by the cleanup...)."""
+    import re
+    out = {}
+    for v in store.q("SELECT note FROM versions WHERE action='delete' AND note LIKE '%recycle bin #%'"):
+        m = re.search(r"recycle bin #(\d+)", v["note"] or "")
+        if m:
+            why = v["note"][:m.start()].strip().rstrip(":")
+            why = why.replace("sync: ", "Sync: ").replace("cleanup: ", "Cleanup: ")
+            out.setdefault(int(m.group(1)), why or "Deleted from the Contacts page")
+    return out
 
 
 def prune():

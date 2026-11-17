@@ -21,6 +21,7 @@ import logging
 import threading
 import time
 
+import backup
 import clean
 import google
 import model
@@ -229,8 +230,11 @@ def run(trigger="schedule", allow_deletes=False):
                 c["skipped"] += 1
                 continue
             try:
-                writer.delete([{"side": keep, "id": lk[COL[keep][0]]}],
-                              also_saved={gone_side: [json.loads(lk[COL[gone_side][2]] or "{}")]},
+                saved = {gone_side: [json.loads(lk[COL[gone_side][2]] or "{}")]}
+                photo = backup.latest_photo(gone_side, lk[COL[gone_side][0]])    # it's gone: use last night's
+                if photo:
+                    saved["photos"] = {gone_side: photo}
+                writer.delete([{"side": keep, "id": lk[COL[keep][0]]}], also_saved=saved,
                               note=f"sync: deleted in {LABEL[gone_side]}")
                 store.x("DELETE FROM links WHERE id=?", (lk["id"],))
                 c["deleted"] += 1

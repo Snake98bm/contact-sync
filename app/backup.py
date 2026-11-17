@@ -37,13 +37,31 @@ def vcard(c):
     return "\r\n".join(out) + "\r\n"
 
 
-def save(raw_ms, raw_google, contacts, extra=None):
-    """Write one backup folder and return its name."""
+def latest_photo(side, cid):
+    """A contact's photo (base64) from the newest backup that has photos, or None."""
+    for b in listing():
+        p = os.path.join(store.BACKUP_DIR, b["name"], "photos.json.gz")
+        if os.path.exists(p):
+            try:
+                if _photo_cache.get("name") != b["name"]:
+                    with gzip.open(p, "rt") as f:
+                        _photo_cache.update(name=b["name"], data=json.load(f))
+                return (_photo_cache["data"].get(side) or {}).get(cid)
+            except (OSError, ValueError):
+                return None
+    return None
+
+
+_photo_cache = {}
+
+
+def save(raw_ms, raw_google, contacts, extra=None, photos=None):
+    """Write one backup folder and return its name. photos: {side: {id: base64}}."""
     name = time.strftime(NAME_FMT)
     folder = os.path.join(store.BACKUP_DIR, name)
     os.makedirs(folder, exist_ok=True)
     os.chmod(folder, 0o700)
-    for fname, data in (("microsoft.json.gz", raw_ms), ("google.json.gz", raw_google)):
+    for fname, data in (("microsoft.json.gz", raw_ms), ("google.json.gz", raw_google), ("photos.json.gz", photos)):
         if data is not None:
             with gzip.open(os.path.join(folder, fname), "wt", encoding="utf-8") as f:
                 json.dump(data, f)

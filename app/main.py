@@ -237,7 +237,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, web.report_page(runner.report))
         if path == "/contacts":
             return self._send(200, web.contacts_page(runner.report, qs.get("q", [""])[0].strip()[:100],
-                                                     qs.get("show", [""])[0]))
+                                                     qs.get("show", [""])[0], qs.get("group", [""])[0][:100],
+                                                     qs.get("sort", ["name"])[0]))
         m = re.fullmatch(r"/contacts/([0-9a-f]{12})(/edit)?", path)
         if m:
             p = _person(m.group(1))
@@ -269,7 +270,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({**sync.status(), "runs": sync.recent_runs(5), "conflicts": sync.recent_conflicts(20)})
         if path == "/bin":
             return self._send(200, web.bin_page(writer.bin_items(), qs.get("msg", [""])[0][:300],
-                                                qs.get("error", [""])[0][:300], writer.mode()))
+                                                qs.get("error", [""])[0][:300], writer.mode(),
+                                                q=qs.get("q", [""])[0].strip()[:100], show=qs.get("show", [""])[0],
+                                                sort=qs.get("sort", ["new"])[0]))
+        m = re.fullmatch(r"/bin/(\d+)", path)
+        if m:
+            it = writer.bin_item(int(m.group(1)))
+            if not it:
+                return self._send(404, web.page("Not found", "/bin", "<h1>Not found</h1><p><a href='/bin'>Recycle bin"
+                                                "</a></p>"))
+            return self._send(200, web.bin_detail_page(it, writer.mode()))
         if path == "/api/contacts":
             q = qs.get("q", [""])[0].strip()
             people = [x for x in (runner.report or {}).get("people", []) if web._match(x, q)]
