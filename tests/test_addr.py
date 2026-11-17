@@ -180,6 +180,21 @@ def test_repeated_address_removed():
          "addresses": [], "birthday": "", "notes": "", "groups": [], "updated": ""}
     rec, reasons, _ = cleanup.tidy(c)
     assert len(rec["addr"]) == 1 and rec["addr"][0]["postal"] == "90000" and "remove repeated address" in reasons
+    # the same place under two types and spelled differently: one kept, as Work
+    other = A("1 Example Street", "Springfield", "CA", "90000", typ="other")
+    work = A("1 Example St.", "Springfield", "CA", "", typ="work")
+    rec, reasons, _ = cleanup.tidy(dict(c, addr=[other, work]))
+    assert len(rec["addr"]) == 1 and rec["addr"][0]["type"] == "work" and rec["addr"][0]["postal"] == "90000", rec
+    # same street in another town is a different place
+    rec, _, _ = cleanup.tidy(dict(c, addr=[home, A("1 Example St", "Shelbyville", "CA", "", typ="work")]))
+    assert len(rec["addr"]) == 2
+
+
+def test_street_differs():
+    assert addr.street_differs("Suite D 120 S. Example Oak", "120 N Example Oaks Dr")
+    assert addr.street_differs("120 S Example Oaks Dr", "120 N Example Oaks Dr")
+    assert not addr.street_differs("920 W. Example Ave", "920 W Example Avenue")
+    assert not addr.street_differs("5 north example drive", "5 N EXAMPLE DR")
 
 
 if __name__ == "__main__":

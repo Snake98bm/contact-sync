@@ -67,17 +67,20 @@ def tidy(c, region="US"):
             reasons.append("remove “Contact Imported” block")
         else:
             reasons.append("keep “Contact Imported” block (its address isn't in the address fields)")
-    # the same address listed twice (left by an older sync tool): keep the most complete one
+    # the same address listed twice (left by an older sync tool), even under two types (Work + Other):
+    # keep the most complete one, and Work/Home over Other
     kept, repeats = [], 0
     for a in rec.get("addr") or []:
-        key = (a.get("type"), _street_key(a))
-        same = next((k for k in kept if (k.get("type"), _street_key(k)) == key), None)
+        same = next((k for k in kept if _street_key(k) and _street_key(k) == _street_key(a)
+                     and _no_clash(k, a)), None)
         if same is None:
             kept.append(dict(a))
             continue
         repeats += 1
+        typ = same.get("type") if (same.get("type") or "other") != "other" else (a.get("type") or same.get("type"))
         if len(model.addr_line(a)) > len(model.addr_line(same)):
             same.update(a)
+        same["type"] = typ
     if repeats:
         rec["addr"] = kept
         reasons.append(f"remove repeated address{'es' if repeats > 1 else ''}")
@@ -276,12 +279,15 @@ def build_plan(progress=None):
         seen_addr = {}
         for c in p["members"]:
             for a in c.get("addr") or []:
-                k = (a.get("type"), _street_key(a))
+                k = _street_key(a) or f"(no street) {a.get('type')}"   # one row per place, whatever its type
                 g = seen_addr.setdefault(k, {"addr": a, "members": []})
+                if (g["addr"].get("type") or "other") == "other" and (a.get("type") or "other") != "other":
+                    g["addr"] = a                                    # show Work/Home over Other
                 if all(m is not c for m in g["members"]):      # a contact listing it twice counts once
                     g["members"].append(c)
-        for (typ, skey), g in seen_addr.items():
+        for skey, g in seen_addr.items():
             a = g["addr"]
+            typ = a.get("type")
             after, how, confident = addr.fix(a, lookup=lookup, zip_city=zip_city)
             changed = any((after.get(x) or "") != (a.get(x) or "") for x in ("street", "city", "region", "postal", "country"))
             missing = [x for x in ("street", "city", "region", "postal") if not (after.get(x) or "").strip()]
@@ -482,8 +488,16 @@ def _do_combine(item, region, _names):
 
 
 def _street_key(a):
+    """First street line, ignoring capitals, punctuation and spelling ('Drive' = 'Dr', 'North' = 'N')."""
     first = (a.get("street") or "").replace("\r", "").split("\n")[0]
-    return " ".join(first.lower().replace(",", " ").replace(".", " ").split())
+    return " ".join(addr._street_words(first))
+
+
+def _no_clash(a, b):
+    """Two addresses with the same street are one place unless a filled-in city or ZIP disagrees."""
+    ca, cb = (a.get("city") or "").strip().lower(), (b.get("city") or "").strip().lower()
+    za, zb = (a.get("postal") or "").strip()[:5], (b.get("postal") or "").strip()[:5]
+    return not (ca and cb and ca != cb) and not (za and zb and za != zb)
 
 
 def _do_address(item, region, _names):
@@ -501,13 +515,15 @@ def _do_address(item, region, _names):
             continue
         rec = model.editable(c)
         same_type = [a for a in rec["addr"] if a.get("type") == item["addr_type"]]
-        target = next((a for a in same_type if _street_key(a) == item["street_key"]),
-                      same_type[0] if len(same_type) == 1 else None)
-        if target is None:
+        want = _street_key({"street": item["street_key"]})          # older plans stored the plainer key
+        targets = [a for a in rec["addr"] if _street_key(a) == want]
+        if not targets and len(same_type) == 1:
+            targets = same_type
+        targets = [a for a in targets if not all((a.get(k) or "").strip() == new[k] for k in new)]
+        if not targets:
             continue
-        if all((target.get(k) or "").strip() == new[k] for k in new):
-            continue
-        target.update(new)
+        for target in targets:
+            target.update(new)
         writer.update([m], rec, action="cleanup", note="cleanup: address fixed")
         done.append(LABEL[m["side"]])
     return f"address updated in {' and '.join(done)}" if done else ""

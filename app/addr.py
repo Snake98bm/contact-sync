@@ -205,6 +205,23 @@ STREET_TYPES = {"ave", "avenue", "st", "street", "dr", "drive", "rd", "road", "c
 TRY_TYPES = ("Ave", "St", "Dr", "Rd", "Ct", "Ln", "Way")
 
 
+_ABBR = {"avenue": "ave", "av": "ave", "street": "st", "drive": "dr", "road": "rd", "court": "ct", "lane": "ln",
+         "boulevard": "blvd", "place": "pl", "circle": "cir", "highway": "hwy", "parkway": "pkwy", "terrace": "ter",
+         "trail": "trl", "square": "sq", "north": "n", "south": "s", "east": "e", "west": "w",
+         "northeast": "ne", "northwest": "nw", "southeast": "se", "southwest": "sw"}
+
+
+def _street_words(s):
+    words = re.sub(r"[^a-z0-9 ]", " ", (s or "").lower()).split()
+    return [_ABBR.get(w, w) for w in words]
+
+
+def street_differs(typed, census_street):
+    """True when the Census street is really different (direction, name, missing street type), not just
+    written differently ('W.' vs 'W', 'Avenue' vs 'Ave', capitals)."""
+    return _street_words(typed) != _street_words(census_street)
+
+
 def zip_cities(addresses):
     """ZIP -> the city most of your contacts with that ZIP have (to fill a missing city for a lookup)."""
     import collections
@@ -294,10 +311,11 @@ def fix(a, lookup=True, zip_city=None):
                 a["postal"] = got["postal"]
                 how.append(f"ZIP {old_zip} looks wrong: the Census Bureau has {got['postal']} for {got['matched']}")
                 confident = False                        # changes what's there: the owner decides
-            if (used != core or guessed) and got.get("street"):
+            if got.get("street") and (used != core or guessed or street_differs(core, got["street"])):
                 a["street"] = "\n".join([got["street"] + (f" {unit}" if unit else "")] + lines[1:])
                 how.append(("street type guessed: the Census Bureau knows it as " if guessed else
-                            "street put in order as the Census Bureau knows it: ") + got["street"])
+                            "street put in order as the Census Bureau knows it: " if used != core else
+                            "street differs from what the Census Bureau has: ") + got["street"])
                 confident = False
         elif failed:
             how.append(f"the address lookup failed ({failed}): rebuild the plan later to try again")
