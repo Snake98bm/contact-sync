@@ -70,7 +70,8 @@ def pill(text, cls):
 
 
 def page(title, active, body, refresh=False, nav_on=True):
-    links = [("/", "Dashboard"), ("/contacts", "Contacts"), ("/report", "Cleanup report"), ("/bin", "Recycle bin"), ("/backups", "Backups"),
+    links = [("/", "Dashboard"), ("/contacts", "Contacts"), ("/sync", "Sync"), ("/report", "Cleanup report"),
+             ("/bin", "Recycle bin"), ("/backups", "Backups"),
              ("/settings", "Settings")]
     nav = ""
     if nav_on:
@@ -617,7 +618,7 @@ def contact_page(p, r, history=(), msg="", error="", write_mode="off"):
         confirm_restore = "return confirm('Put this earlier version back on both sides?')"
         for h in history:
             btn = ""
-            if h["has_before"] and h["action"] in ("edit", "restore") and write_mode != "off" and not dup:
+            if h["has_before"] and h["action"] in ("edit", "restore", "sync") and write_mode != "off" and not dup:
                 btn = (f'<form method="post" action="/contacts/{key}/history/{h["id"]}/restore" class="inline" '
                        f'onsubmit="{confirm_restore}"><button class="ghost">Restore this version</button></form>')
             hrows.append(f"<tr><td class='num'>{when(h['ts'])}</td><td>{esc(h['action'])}</td>"
@@ -747,3 +748,89 @@ def bin_page(items, msg="", error="", write_mode="off"):
             + (f'<div class="banner err">{esc(error)}</div>' if error else "")
             + _section("items", "Deleted contacts", "", rows, ["Name", "Deleted", "Had copies in", ""]))
     return page("Recycle bin", "/bin", body)
+
+
+# ---------- sync ----------
+
+FIELD_LABEL = {"given": "first name", "middle": "middle name", "family": "last name", "company": "company",
+               "title": "job title", "emails": "emails", "phones": "phones", "addr": "addresses",
+               "birthday": "birthday", "notes": "notes"}
+
+
+def _short(v):
+    try:
+        v = json.loads(v)
+    except (TypeError, ValueError):
+        pass
+    if isinstance(v, list):
+        v = ", ".join(x.get("value") if isinstance(x, dict) and "value" in x else
+                      (", ".join(str(y) for y in x.values() if y) if isinstance(x, dict) else str(x)) for x in v)
+    v = str(v or "(empty)")
+    return v if len(v) <= 80 else v[:77] + "…"
+
+
+def sync_page(st, runs, conflicts, write_mode, msg="", error=""):
+    b = ["<h1>Sync</h1>"]
+    if msg:
+        b.append(f'<div class="banner">{esc(msg)}</div>')
+    if error:
+        b.append(f'<div class="banner err">{esc(error)}</div>')
+    if write_mode == "off":
+        b.append('<div class="banner warnb">Write mode is off (Settings), so sync can\'t change anything.</div>')
+    elif write_mode == "test":
+        b.append('<div class="banner warnb">Write mode is “test”: only contacts named “Contact-Sync Test…” are '
+                 'synced. Everything else is counted as skipped until you switch it to “on” in Settings.</div>')
+    if not st["started"]:
+        b.append("""<p class="sub">Sync isn't running yet. Starting it links every contact that is already the same
+person in both accounts (same email or phone, matching name). Contacts that are only on one side, or duplicated,
+are left alone until the cleanup; contacts you add after today are copied to the other side.</p>
+<ul class="small"><li>A change on one side is copied to the other.</li>
+<li>Changed on both: merged field by field; if the same field changed on both, the newer edit wins and the other
+value is kept in the conflict list below.</li>
+<li>Deleted on one side: deleted on the other too. Both copies go to the recycle bin (90 days) first.</li></ul>
+<form method="post" action="/sync/start"><button>Start syncing</button></form>""")
+        return page("Sync", "/sync", "".join(b))
+    last = st["last"]
+    state = pill("Running", "info") if st["running"] else (pill("On", "ok") if st["enabled"] else pill("Paused", "warn"))
+    b.append(f'<p class="sub">{state} · {st["linked"]} contacts linked · every {st["minutes"]} minutes'
+             + (f' · last run {when(last["started"])}' if last else "") + "</p>")
+    if st["running"]:
+        b.append(f'<div class="banner">{esc(st["step"])}…</div>')
+    if last and last.get("blocked"):
+        b.append(f'<div class="banner err">{esc(last["blocked"])}<form method="post" action="/sync/allow-deletes" '
+                 'style="margin-top:8px"><button>Allow these deletes and run now</button></form></div>')
+    if last and last.get("error"):
+        b.append(f'<div class="banner err">Last run: {esc(last["error"])}</div>')
+    dis = " disabled" if st["running"] else ""
+    b.append('<div class="bar">'
+             f'<form method="post" action="/sync/run" class="inline"><button{dis}>Sync now</button></form>'
+             + (f'<form method="post" action="/sync/pause" class="inline"><button class="ghost">Pause</button></form>'
+                if st["enabled"] else
+                f'<form method="post" action="/sync/resume" class="inline"><button class="ghost">Resume</button></form>')
+             + "</div>")
+    rows = []
+    for r in runs:
+        lines = json.loads(r.get("log") or "[]")
+        detail = ("<details><summary>" + f"{len(lines)} change{'s' if len(lines) != 1 else ''}</summary><ul class='small'>"
+                  + "".join(f"<li>{esc(x)}</li>" for x in lines) + "</ul></details>") if lines else ""
+        status = pill("Failed", "bad") if r.get("error") else (pill("Held deletes", "warn") if r.get("blocked") else pill("OK", "ok"))
+        rows.append(f"<tr><td class='num'>{when(r['started'])}</td><td>{esc(r['trigger'])}</td><td>{status}</td>"
+                    f"<td class='num'>{r['created'] or 0}</td><td class='num'>{r['updated'] or 0}</td>"
+                    f"<td class='num'>{r['deleted'] or 0}</td><td class='num'>{r['conflicts'] or 0}</td>"
+                    f"<td class='num'>{r['skipped'] or 0}</td><td>{detail}</td></tr>")
+    b.append(_section("runs", "Recent runs", "", rows,
+                      ["When", "Why", "Result", "Copied", "Updated", "Deleted", "Conflicts", "Skipped", "Details"]))
+    rows = [f"<tr><td class='num'>{when(cf['ts'])}</td><td>{esc(cf['name'])}</td>"
+            f"<td>{esc(FIELD_LABEL.get(cf['field'], cf['field']))}</td>"
+            f"<td>{pill(*SIDE[cf['kept_side']])} {esc(_short(cf['kept_value']))}</td>"
+            f"<td>{pill(*SIDE[cf['lost_side']])} {esc(_short(cf['lost_value']))}</td></tr>" for cf in conflicts]
+    b.append(_section("conflicts", "Conflicts", "The same field changed in both accounts; the newer edit was kept. "
+                      "To use the other value, open the contact and restore that version from its history, or edit it.",
+                      rows, ["When", "Contact", "Field", "Kept", "Replaced"]))
+    b.append(f"""<h2>Sync settings</h2><form method="post" action="/sync/settings">
+<label>Run every (minutes)</label><input type="number" name="sync_minutes" min="5" max="1440" value="{st['minutes']}">
+<label>Hold back deletes when more than this many happen in one run</label>
+<input type="number" name="sync_max_deletes" min="0" max="1000" value="{st['max_deletes']}">
+<div class="hint">A safety stop: a big batch of deletes waits for you to allow it here.</div>
+<p><button>Save</button></p></form>""")
+    return page("Sync", "/sync", "".join(b), refresh=False)

@@ -197,20 +197,23 @@ def create(rec, sides=("microsoft", "google"), action="create", note=""):
         return ids, warnings
 
 
-def delete(members):
-    """Delete every copy of a person; both sides' data go to the recycle bin first. Returns the bin id."""
+def delete(members, also_saved=None, note=""):
+    """Delete every copy of a person; both sides' data go to the recycle bin first. Returns the bin id.
+    also_saved: {side: [raw]} for a copy that is already gone (sync: deleted in the other account),
+    so the bin holds both sides."""
+    also_saved = also_saved or {}
     with _lock:
         fresh = [(m, *_fresh(m)) for m in members]
         _check(*[c["name"] for _, _, c in fresh])
-        ms_raw = [raw for m, raw, _ in fresh if m["side"] == "microsoft"]
-        g_raw = [raw for m, raw, _ in fresh if m["side"] == "google"]
+        ms_raw = [raw for m, raw, _ in fresh if m["side"] == "microsoft"] or list(also_saved.get("microsoft") or [])
+        g_raw = [raw for m, raw, _ in fresh if m["side"] == "google"] or list(also_saved.get("google") or [])
         name = next((c["name"] for _, _, c in fresh if c["name"]), "(no name)")
         bin_id = store.x("INSERT INTO bin(ts, name, ms_raw, g_raw) VALUES(?,?,?,?)",
                          (time.time(), name, json.dumps(ms_raw), json.dumps(g_raw)))
         batch, done, removed = uuid.uuid4().hex, [], []
         try:
             for m, raw, c in fresh:
-                vid = _version(m["side"], m["id"], c["name"], "delete", before=raw, note=f"recycle bin #{bin_id}",
+                vid = _version(m["side"], m["id"], c["name"], "delete", before=raw, note=(note + " " if note else "") + f"recycle bin #{bin_id}",
                                batch=batch)
                 try:
                     with net.writes_allowed():

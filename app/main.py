@@ -20,6 +20,7 @@ import store
 import tls
 import webauthn
 import web
+import sync
 import writer
 from jobs import Runner
 from version import VERSION
@@ -34,7 +35,12 @@ TLS_ON = os.environ.get("TLS", "1").strip() not in ("0", "false", "no", "off")
 PUBLIC_HTTPS_PORT = int(os.environ.get("PUBLIC_HTTPS_PORT", str(HTTPS_PORT)))
 runner = Runner()
 device = msgraph.DeviceLogin()
-writer.listener = runner.apply_change     # keep the pages current after each change, no re-download
+def _on_change(removed=(), upserted=()):
+    runner.apply_change(removed=removed, upserted=upserted)     # keep the pages current, no re-download
+    sync.after_write(removed=removed, upserted=upserted)       # page edits become the new sync base
+
+
+writer.listener = _on_change
 _google_url = {"url": ""}
 
 
@@ -64,6 +70,11 @@ def scheduler():
                 last = key
                 if msgraph.status()["state"] == "ok" or google.status()["state"] == "ok":
                     runner.start("nightly")
+            if s.get("sync_enabled") and not runner.progress["running"]:
+                last_sync = (store.q("SELECT started FROM sync_runs ORDER BY id DESC LIMIT 1") or [{"started": 0}])[0]
+                if time.time() - (last_sync["started"] or 0) >= int(s.get("sync_minutes", 60)) * 60 \
+                        and msgraph.status()["state"] == "ok" and google.status()["state"] == "ok":
+                    threading.Thread(target=sync.run, args=("schedule",), daemon=True).start()
         except Exception:
             log.exception("scheduler")
         time.sleep(20)
@@ -244,6 +255,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, web.contact_page(p, runner.report, writer.history([c["id"] for c in p["members"]]),
                                                     msg=qs.get("msg", [""])[0][:500], error=qs.get("error", [""])[0][:500],
                                                     write_mode=writer.mode()))
+        if path == "/sync":
+            return self._send(200, web.sync_page(sync.status(), sync.recent_runs(), sync.recent_conflicts(),
+                                                 writer.mode(), qs.get("msg", [""])[0][:300], qs.get("error", [""])[0][:300]))
+        if path == "/api/sync":
+            return self._json({**sync.status(), "runs": sync.recent_runs(5), "conflicts": sync.recent_conflicts(20)})
         if path == "/bin":
             return self._send(200, web.bin_page(writer.bin_items(), qs.get("msg", [""])[0][:300],
                                                 qs.get("error", [""])[0][:300], writer.mode()))
@@ -382,6 +398,32 @@ class Handler(BaseHTTPRequestHandler):
             return self._redirect("/bin?" + urllib.parse.urlencode(
                 {"msg": "Restored to " + " and ".join("Microsoft 365" if s == "microsoft" else "Google" for s in ids)
                  + "." + (" " + " ".join(warns) if warns else "")}))
+        if path.startswith("/sync/"):
+            back = lambda k, v: self._redirect("/sync?" + urllib.parse.urlencode({k: v}))
+            try:
+                if path == "/sync/start":
+                    n = sync.start()
+                    threading.Thread(target=sync.run, args=("first",), daemon=True).start()
+                    return back("msg", f"Sync started: {n} contacts linked. The first run is going now.")
+                if path in ("/sync/run", "/sync/allow-deletes"):
+                    threading.Thread(target=sync.run, args=("manual", path.endswith("deletes")), daemon=True).start()
+                    return back("msg", "Sync run started.")
+                if path in ("/sync/pause", "/sync/resume"):
+                    sync.pause(path.endswith("resume"))
+                    return back("msg", "Sync resumed." if path.endswith("resume") else "Sync paused.")
+                if path == "/sync/settings":
+                    s = store.load_settings()
+                    mins, maxd = int(f("sync_minutes") or 60), int(f("sync_max_deletes") or 10)
+                    if not (5 <= mins <= 1440 and 0 <= maxd <= 1000):
+                        return back("error", "Every 5–1440 minutes; held-back deletes 0–1000.")
+                    s.update(sync_minutes=mins, sync_max_deletes=maxd)
+                    store.save_settings(s)
+                    return back("msg", "Saved.")
+            except (writer.Refused, ValueError) as e:
+                return back("error", str(e))
+            except Exception as e:
+                log.exception("sync action failed")
+                return back("error", f"Failed: {e}"[:300])
         if path == "/test-contact":
             try:
                 writer.create(dict(writer.TEST_REC))
@@ -398,6 +440,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "bad JSON"}, 400)
         try:
             with writer.test_only():
+                if path == "/api/sync/run":         # inside test_only(): only test contacts are written
+                    rid = sync.run("api")
+                    run = (store.q("SELECT * FROM sync_runs WHERE id=?", (rid,)) or [None])[0] if rid else None
+                    return self._json({"run": run} if run else {"error": "a sync run is already going"},
+                                      200 if run else 409)
                 if path == "/api/test-contact":
                     ids, warns = writer.create(dict(writer.TEST_REC))
                     return self._json({"ids": ids, "warnings": warns})
@@ -550,6 +597,7 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     store.init()
     writer.init()
+    sync.init()
     writer.prune()
     store.x("UPDATE runs SET finished=started, error='Interrupted (container restarted)' WHERE finished IS NULL")
     if not os.path.exists(store.SETTINGS_PATH):
