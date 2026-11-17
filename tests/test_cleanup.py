@@ -280,6 +280,22 @@ def test_cleanup():
     assert not writer.busy["cleanup"]
 
 
+def test_shared_number_marked_right():
+    mode("on")
+    ms("AAM-cara", "Cara", "Sample", "cara@example.com", "(559) 555-0777")
+    ms("AAM-drew", "Drew", "Sample", "drew@example.com", "(559) 555-0777")
+    plan = cleanup.build_plan()
+    sh = [i for i in plan["items"] if i["kind"] == "shared" and "Cara" in i["title"]]
+    assert len(sh) == 1, [i["title"] for i in plan["items"] if i["kind"] == "shared"]
+    choice = cleanup.choices_from_form(plan["plan_id"], {f"shared_{sh[0]['id']}": "ok"}.get, lambda k: [])
+    assert choice[sh[0]["id"]] == {"mode": "ok"}
+    msg = cleanup._do_shared(dict(sh[0], choice=choice[sh[0]["id"]]), "US", {})
+    assert "won't be asked again" in msg and "Home" in msg, msg
+    assert MS["AAM-cara"]["homePhones"] and not MS["AAM-cara"].get("mobilePhone"), MS["AAM-cara"]
+    again = [i for i in cleanup.build_plan()["items"] if i["kind"] == "shared" and "Cara" in i["title"]]
+    assert not again, "asked again after it was marked right"
+
+
 def test_parallel_pieces():
     import threading
     import time as t

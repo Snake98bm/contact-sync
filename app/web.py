@@ -1080,13 +1080,23 @@ f.addEventListener('change',save);f.addEventListener('input',save);
 REVIEW_PILL = ' <span class="pill p-warn rv">Review</span>'    # reads "Reviewed" once ticked (CSS)
 
 
+def _is_review(i):
+    """A fix was found but it isn't sure (ZIP correction, street suggestion, guess): shown yellow."""
+    a, b = i.get("after") or {}, i.get("before") or {}
+    return not i["default"] and any((a.get(k) or "") != (b.get(k) or "")
+                                    for k in ("street", "city", "region", "postal", "country"))
+
+
 def _address_rows(items):
     """Each address: before, and editable boxes holding the proposed fix. One person's addresses sit together
     under one heading."""
     import itertools
     rows = []
-    for title, grp in itertools.groupby(items, key=lambda i: i["title"]):
-        grp = list(grp)
+    people = [list(g) for _, g in itertools.groupby(items, key=lambda i: i["title"])]
+    # yellow (fix to check) first, then the confident ones, then those nothing could be worked out for
+    people.sort(key=lambda g: 0 if any(_is_review(i) for i in g) else 1 if any(i["default"] for i in g) else 2)
+    for grp in people:
+        title = grp[0]["title"]
         if len(grp) > 1:
             sides = {m["side"] for i in grp for m in i["members"]}
             rows.append(f"<tr class='person'><td></td><td colspan='2'><b>{esc(title)}</b> "
@@ -1106,8 +1116,7 @@ def _address_row(i, show_name=True):
     box = lambda k, ph, w: (f"<input type='text' name='addr_{n}_{k}' value='{esc(a.get(k, ''))}' placeholder='{ph}' "
                             f"style='width:{w}px' onchange=\"{tick}\">")
     # a fix was found but it isn't sure (ZIP correction, street suggestion, guess): yellow, for review
-    review = not i["default"] and any((a.get(k) or "") != (b.get(k) or "")
-                                      for k in ("street", "city", "region", "postal", "country"))
+    review = _is_review(i)
     typ = esc((i.get("addr_type") or "").title())
     head = f"{esc(i['title'])} {who}" if show_name else f"<b>{typ or 'Address'}</b> {who}"
     return (
@@ -1146,6 +1155,9 @@ def _shared_cards(items):
             f"<div class='bar' style='margin:8px 0'>"
             f"<label class='check' style='margin:0'><input type='radio' name='shared_{n}' value='keep' checked> "
             f"Keep them separate, leave as is</label>"
+            f"<label class='check' style='margin:0'><input type='radio' name='shared_{n}' value='ok'> "
+            + ("This is right: a shared home number (label it Home, don't ask again)" if i.get("kind_of") == "phone"
+               else "This is right: a shared email (don't ask again)") + "</label>"
             f"<label class='check' style='margin:0'><input type='radio' name='shared_{n}' value='strip' id='s{n}strip'> "
             f"Remove the {what} from the people ticked below</label>"
             f"<label class='check' style='margin:0'><input type='radio' name='shared_{n}' value='combine'> "
@@ -1201,9 +1213,7 @@ def cleanup_page(plan, st, write_mode, msg="", error=""):
         title, intro = KIND_TITLE[kind]
         if kind == "address":
             on = sum(1 for i in items if i["default"])
-            rev = sum(1 for i in items if not i["default"] and any(
-                ((i.get("after") or {}).get(k) or "") != ((i.get("before") or {}).get(k) or "")
-                for k in ("street", "city", "region", "postal", "country")))
+            rev = sum(1 for i in items if _is_review(i))
             b.append(f"<h2>{esc(title)} <span class='muted'>({on} of {len(items)} ticked)</span></h2>"
                      + (f"<p class='small'>{pill(f'{rev} to review', 'warn')} yellow rows have a fix that isn't "
                         "certain: check it, then tick it.</p>" if rev else "") +

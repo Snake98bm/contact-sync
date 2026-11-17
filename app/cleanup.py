@@ -39,7 +39,13 @@ PAUSE = 0.2               # between items, per worker (net.py also paces each se
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS cleanup_plans(id INTEGER PRIMARY KEY, created REAL, plan TEXT, applied REAL, result TEXT);
+-- a phone/email the owner said is rightly shared by these people (a household): not asked about again
+CREATE TABLE IF NOT EXISTS shared_ok(kind TEXT, value TEXT, people TEXT, ts REAL, PRIMARY KEY(kind, value, people));
 """
+
+
+def _people_key(names):
+    return " | ".join(sorted({(n or "").strip().lower() for n in names}))
 
 state = {"running": False, "step": "", "done": 0, "total": 0, "log": [], "plan_id": None,
          "building": False, "build_step": "", "build_error": ""}
@@ -244,6 +250,9 @@ def build_plan(progress=None):
                 seen_keys.add(p["key"])
                 people.append({"name": p["name"] or "(no name)",
                                "members": [{"side": x["side"], "id": x["id"], "name": x["name"]} for x in p["members"]]})
+        if store.q("SELECT 1 FROM shared_ok WHERE kind=? AND value=? AND people=?",
+                   (s["kind"], s["value"], _people_key(p["name"] for p in people))):
+            continue                                     # the owner already said this is right
         shown = clean.pretty_phone(s["value"]) if s["kind"] == "phone" else s["value"]
         all_members = [x for p in people for x in p["members"]]
         add("shared", " / ".join(p["name"] for p in people),
@@ -370,6 +379,8 @@ def choices_from_form(plan_id, f, form_all):
             mode = f(f"shared_{n}")
             if mode == "combine":
                 out[n] = {"mode": "combine", "name": name}
+            elif mode == "ok":
+                out[n] = {"mode": "ok"}
             elif mode == "strip":
                 people = sorted({int(x) for x in form_all(f"strip_{n}") if str(x).isdigit()
                                  and int(x) < len(i.get("people") or [])})
@@ -624,6 +635,8 @@ def _do_shared(item, region, names):
     choice = item.get("choice") if isinstance(item.get("choice"), dict) else {}
     if choice.get("mode") == "combine":
         return _do_combine(item, region, names)
+    if choice.get("mode") == "ok":
+        return _do_shared_ok(item, region)
     if choice.get("mode") != "strip" or not choice.get("people"):
         return ""
     done = []
@@ -648,6 +661,31 @@ def _do_shared(item, region, names):
             writer.update([m], rec, action="cleanup", note=f"cleanup: removed shared {item['kind_of']} {item['shown']}")
         done.append(person["name"])
     return f"removed {item['shown']} from {', '.join(done)}" if done else ""
+
+
+def _do_shared_ok(item, region):
+    """The owner says the shared phone/email is right (married couple, household): remember it so it isn't
+    asked again, and label a shared phone Home on every copy."""
+    relabelled = 0
+    if item["kind_of"] == "phone":
+        for m in item["members"]:
+            try:
+                raw, c = _fresh(m)
+            except Exception:
+                continue
+            rec = model.editable(c)
+            hit = [p for p in rec["phones"] if clean.norm_phone(p["value"], region)[0] == item["value"]
+                   and p.get("type") != "home"]
+            if not hit:
+                continue
+            for p in hit:
+                p["type"] = "home"
+            writer.update([m], rec, action="cleanup", note=f"cleanup: {item['shown']} labelled Home (shared)")
+            relabelled += 1
+    store.x("INSERT OR REPLACE INTO shared_ok(kind, value, people, ts) VALUES(?,?,?,?)",
+            (item["kind_of"], item["value"], _people_key(p["name"] for p in item["people"]), time.time()))
+    return (f"kept {item['shown']} as shared" + (f", labelled Home on {relabelled} copies" if relabelled else "")
+            + "; won't be asked again")
 
 
 def _do_copy(item, region, _names):
