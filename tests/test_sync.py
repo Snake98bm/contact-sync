@@ -85,6 +85,7 @@ google.fetch_all = lambda: ([copy.deepcopy(p) for rn, p in G.items() if rn not i
 google.get_person = g_get
 google.create_person = lambda body: g_put(f"people/c{len(G) + 100}x{CLOCK[0]}", body)
 google.update_person = g_update
+google.add_to_my_contacts = lambda rns: None          # fake: never the real Google
 google.delete_person = lambda rn: G.pop(rn)
 
 

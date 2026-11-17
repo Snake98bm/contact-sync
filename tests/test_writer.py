@@ -91,6 +91,7 @@ def g_get(rn):
 msgraph.create_contact, msgraph.update_contact, msgraph.delete_contact = ms_create, ms_update, ms_delete
 msgraph.get_contact = lambda cid: copy.deepcopy(MS[cid])
 google.create_person, google.update_person, google.delete_person, google.get_person = g_create, g_update, g_delete, g_get
+google.add_to_my_contacts = lambda rns: None          # fake: never the real Google
 
 
 def members(ids):

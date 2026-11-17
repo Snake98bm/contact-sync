@@ -137,6 +137,11 @@ def _send(side, cid, rec=None, base=None, raw=None):
                         warn.append("a Google label it was in no longer exists, so it was restored without labels")
                     else:
                         raise
+                # a contact outside "My Contacts" lives only in its labels and vanishes if a label goes
+                groups = [(m.get("contactGroupMembership") or {}).get("contactGroupResourceName")
+                          for m in out.get("memberships") or []]
+                if "contactGroups/myContacts" not in groups and out.get("resourceName"):
+                    google.add_to_my_contacts([out["resourceName"]])
     return out, warn
 
 
@@ -330,11 +335,22 @@ def patch_graph(cid, patch, name, note=""):
 
 
 def delete_label(group_rn, name):
-    """Delete a Google label; its contacts are kept. Only with write mode "on"."""
+    """Delete a Google label; its contacts are kept. Only with write mode "on".
+    Google deletes a contact whose only group is the label being deleted, even with deleteContacts=false
+    (seen 2026-11-17), so every member is first put in My Contacts and that is checked before the delete."""
     if mode() != "on":
         raise Refused("Deleting a label needs write mode “on”.")
     with _lock:
-        _version("google", group_rn, name, "label delete", note="label deleted; its contacts were kept")
+        members = google.group_members(group_rn)
+        with net.writes_allowed():
+            google.add_to_my_contacts(members)
+        mine = set(google.group_members("contactGroups/myContacts"))
+        missing = [m for m in members if m not in mine]
+        if missing:
+            raise Refused(f"{len(missing)} contacts in “{name}” couldn't be put in My Contacts, so the label was "
+                          "left alone (deleting it would delete them).")
+        _version("google", group_rn, name, "label delete",
+                 note=f"label deleted; its {len(members)} contacts were kept (all in My Contacts first)")
         with net.writes_allowed():
             google.delete_group(group_rn)
 

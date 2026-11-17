@@ -48,8 +48,10 @@ WRITE_PATTERNS = [
     ("POST", r"https://people\.googleapis\.com/v1/people:createContact(\?[^/]*)?"),
     ("PATCH", r"https://people\.googleapis\.com/v1/people/[A-Za-z0-9_-]+:updateContact\?[^/]*"),
     ("DELETE", r"https://people\.googleapis\.com/v1/people/[A-Za-z0-9_-]+:deleteContact"),
-    # deleting a Google label only with deleteContacts=false: the contacts in it are never touched
+    # deleting a Google label only with deleteContacts=false (contacts that are in no other group are
+    # still removed by Google, so writer.delete_label first adds every member to My Contacts)
     ("DELETE", r"https://people\.googleapis\.com/v1/contactGroups/[A-Za-z0-9_-]+\?deleteContacts=false"),
+    ("POST", r"https://people\.googleapis\.com/v1/contactGroups/myContacts/members:modify"),
 ]
 _write = threading.local()
 

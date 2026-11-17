@@ -90,13 +90,34 @@ google.group_members = lambda rn: [p["resourceName"] for p in G.values()
                                           for m in p.get("memberships") or [])]
 
 
+def _groups_of(p):
+    return [(m.get("contactGroupMembership") or {}).get("contactGroupResourceName") for m in p.get("memberships") or []]
+
+
 def _del_group(rn):
     assert net.check_allowed("DELETE", f"https://people.googleapis.com/v1/{rn}?deleteContacts=false") is None
     DELETED_GROUPS.append(rn)
     GROUPS.pop(rn)
+    # like the real Google: a contact whose only group was this label goes with it, deleteContacts=false or not
+    for pid, p in list(G.items()):
+        gs = _groups_of(p)
+        if rn in gs and not [g for g in gs if g != rn]:
+            G.pop(pid)
+        elif rn in gs:
+            p["memberships"] = [m for m in p["memberships"]
+                                if (m.get("contactGroupMembership") or {}).get("contactGroupResourceName") != rn]
+
+
+def _add_my(rns):
+    assert net.check_allowed("POST", "https://people.googleapis.com/v1/contactGroups/myContacts/members:modify") is None
+    for rn in rns:
+        if "contactGroups/myContacts" not in _groups_of(G[rn]):
+            G[rn].setdefault("memberships", []).append(
+                {"contactGroupMembership": {"contactGroupResourceName": "contactGroups/myContacts"}})
 
 
 google.delete_group = _del_group
+google.add_to_my_contacts = _add_my
 
 BLOCK = "-----------------------------\nContact Imported:\nHome Street : 1 Example Ave\n"
 
@@ -140,6 +161,8 @@ def setup():
     gg("people/c-v", "Vikki", "", None, ["281-7719"])
     # only in Microsoft
     ms("AAM-solo", "Solo", "Example", "solo@example.com", None)
+    # only in Google, and only in the label that gets deleted (not in My Contacts)
+    gg("people/c-lonely", "Lonely", "Example", "lonely@example.com", ["(559) 555-0500"], groups=["contactGroups/imp"])
     # a linked pair plus a second Outlook copy with nothing shared (must merge, not be copied as new)
     ms("AAM-l1", "Lisa", "Example", None, "(559) 555-0400")
     gg("people/c-l", "Lisa", "Example", None, ["(559) 555-0400"])
@@ -168,7 +191,7 @@ def test_cleanup():
     assert combos["Vikki"]["default"]
     shared = by("shared")
     assert len(shared) == 1 and not shared[0]["default"] and "Anna" in shared[0]["title"]
-    assert [i["title"] for i in by("copy")] == ["Solo Example"], [i["title"] for i in by("copy")]
+    assert [i["title"] for i in by("copy")] == ["Lonely Example", "Solo Example"], [i["title"] for i in by("copy")]
     assert combos["Lisa Example"]["default"] and len(combos["Lisa Example"]["members"]) == 3
     assert by("label")[0]["default"] and by("category")[0]["default"]
 
@@ -233,6 +256,8 @@ def test_cleanup():
     assert store.q("SELECT 1 FROM links WHERE g_id='people/c-l' AND ms_id=?", (lisas[0]["id"],))
     # label removed (contacts kept), Cal-Com copied to Outlook
     assert DELETED_GROUPS == ["contactGroups/imp"] and "people/c-greg" in G
+    assert "people/c-lonely" in G, "a contact only in the deleted label was lost"
+    assert "contactGroups/myContacts" in _groups_of(G["people/c-lonely"])
     assert MS["AAM-greg"].get("categories") == ["Cal-Com"]
     # a sync right after copies nothing back and forth
     r = store.q("SELECT * FROM sync_runs WHERE id=?", (sync.run("test"),))[0]

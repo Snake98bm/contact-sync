@@ -188,6 +188,14 @@ def group_members(group_rn):
     return get(f"{PEOPLE}/{group_rn}?maxMembers=10000").get("memberResourceNames", [])
 
 
+def add_to_my_contacts(resource_names):
+    """Put contacts in the built-in "My Contacts" group (a contact that is only in a label is deleted
+    by Google when that label is deleted). Up to 1000 per call."""
+    rns = [r for r in resource_names if re.fullmatch(r"people/[A-Za-z0-9_-]+", r or "")]
+    for i in range(0, len(rns), 1000):
+        _send("POST", f"{PEOPLE}/contactGroups/myContacts/members:modify", {"resourceNamesToAdd": rns[i:i + 1000]})
+
+
 def delete_group(group_rn):
     """Delete a label, keeping its contacts (deleteContacts=false)."""
     if not re.fullmatch(r"contactGroups/[A-Za-z0-9_-]+", group_rn or ""):
