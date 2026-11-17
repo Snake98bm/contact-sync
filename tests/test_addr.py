@@ -96,6 +96,28 @@ def test_town_line_becomes_city():
         net.request = real
 
 
+def test_wrong_zip_and_jumbled_street():
+    seen = []
+
+    def fake(method, url, **kw):
+        q = urllib.parse.unquote(url.split("address=")[1].split("&")[0])
+        seen.append(q)
+        if q.lower().startswith("120 s. example oak"):            # only the number-first order matches
+            return {"result": {"addressMatches": [{"matchedAddress": "120 S EXAMPLE OAKS DR, SPRINGFIELD, CA, 90002",
+                                                   "addressComponents": {"city": "SPRINGFIELD", "state": "CA",
+                                                                         "zip": "90002"}}]}}
+        return {"result": {"addressMatches": []}}
+    real, net.request = net.request, fake
+    try:
+        a, how, ok = addr.fix(A("Oak Suite D 120 S. Example", "", "CA", "90001"))
+        assert a["street"] == "120 S Example Oaks Dr Suite D", a
+        assert (a["city"], a["region"], a["postal"]) == ("Springfield", "CA", "90002"), a
+        assert any("ZIP 90001 looks wrong" in h for h in how) and any("put in order" in h for h in how) and not ok, how
+        assert all("Suite" not in q for q in seen), seen             # the suite is left out of the lookup
+    finally:
+        net.request = real
+
+
 def test_incomplete_is_not_ticked():
     a, how, ok = addr.fix(A("1 Example St", "Springfield", "", ""), lookup=False)
     assert not ok

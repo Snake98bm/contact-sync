@@ -25,7 +25,7 @@ cleanup.PAUSE = 0
 LOOKUPS = []
 
 
-def _fake_census(a):          # never the real service in tests
+def _fake_census(a, **kw):    # never the real service in tests
     LOOKUPS.append(a)
     return {"city": "Springfield", "region": "CA", "postal": "90000", "matched": "1 EXAMPLE AVE, SPRINGFIELD, CA, 90000"}
 

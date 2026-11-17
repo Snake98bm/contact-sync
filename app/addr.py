@@ -153,11 +153,35 @@ def needs_lookup(a):
         and bool(a.get("city") or a.get("postal") or a.get("region"))
 
 
-def census(a, timeout=20):
-    """Ask the US Census geocoder. Returns {"city","region","postal","matched"} or None.
-    Sends only the street (first line), city, state and ZIP."""
+UNIT_RE = re.compile(r"[,\s]*\b(?:suite|ste\.?|apt\.?|apartment|unit|bldg\.?|building|space|spc\.?|#)\s*#?\s*[\w-]+",
+                     re.I)
+
+
+def split_unit(line):
+    """'120 S Example Oaks Dr Suite D' -> ('120 S Example Oaks Dr', 'Suite D')."""
+    m = UNIT_RE.search(line or "")
+    if not m:
+        return (line or "").strip(), ""
+    return (line[:m.start()] + " " + line[m.end():]).strip(" ,"), m.group(0).strip(" ,")
+
+
+def variants(core):
+    """The street as typed, and, when it doesn't start with the house number, with the number first
+    ('Oak 120 S. Example' -> '120 S. Example Oak')."""
+    out = [core]
+    if core and not core[0].isdigit():
+        m = re.search(r"\b\d+[A-Za-z]?\b", core)
+        if m:
+            out.append(f"{core[m.start():]} {core[:m.start()]}".strip(" ,"))
+    return out
+
+
+def census(a, timeout=20, use_postal=True):
+    """Ask the US Census geocoder. Returns {"city","region","postal","matched","street"} or None.
+    Sends only the street (first line), city, state and (if use_postal) ZIP."""
     street = (a.get("street") or "").split("\n")[0].strip()
-    q = ", ".join(x for x in (street, a.get("city") or "", a.get("region") or "", a.get("postal") or "") if x.strip())
+    q = ", ".join(x for x in (street, a.get("city") or "", a.get("region") or "",
+                              (a.get("postal") or "") if use_postal else "") if x.strip())
     row = (store.q("SELECT result FROM addr_cache WHERE q=?", (q.lower(),)) or [None])[0]
     if row:
         return json.loads(row["result"])
@@ -167,8 +191,9 @@ def census(a, timeout=20):
     out = None
     if len(matches) == 1:                        # one clear match only; several = ambiguous, leave it
         c = matches[0].get("addressComponents") or {}
+        matched = matches[0].get("matchedAddress") or ""
         out = {"city": (c.get("city") or "").title(), "region": c.get("state") or "", "postal": c.get("zip") or "",
-               "matched": matches[0].get("matchedAddress") or ""}
+               "matched": matched, "street": matched.split(",")[0].strip().title()}
     store.x("INSERT OR REPLACE INTO addr_cache(q, result, ts) VALUES(?,?,?)", (q.lower(), json.dumps(out), time.time()))
     time.sleep(0.3)
     return out
@@ -204,9 +229,17 @@ def fix(a, lookup=True):
             a = trial
             how.append(f"took “{town}” out of the street box as the city (not confirmed: check it)")
             confident = False
-    if lookup and needs_lookup(a):
+    lines = [ln.strip() for ln in (a.get("street") or "").split("\n") if ln.strip()]
+    if lookup and lines and (a.get("city") or a.get("postal") or a.get("region")):
+        core, unit = split_unit(lines[0])
+        got = used = None
         try:
-            got = census(a)
+            for v in variants(core):
+                q = dict(a, street=v)
+                got = census(q, use_postal=False) or (census(q) if a.get("postal") else None)
+                if got:
+                    used = v
+                    break
         except Exception as e:
             log.warning("address lookup failed: %s", e)
             got = None
@@ -217,7 +250,16 @@ def fix(a, lookup=True):
             if filled:
                 how.append("looked up " + ", ".join({"city": "city", "region": "state", "postal": "ZIP"}[k] for k in filled)
                            + f" (Census: {got['matched']})")
-        else:
+            old_zip = (a.get("postal") or "").strip()
+            if old_zip and got.get("postal") and "postal" not in filled and old_zip[:5] != got["postal"]:
+                a["postal"] = got["postal"]
+                how.append(f"ZIP {old_zip} looks wrong: the Census Bureau has {got['postal']} for {got['matched']}")
+                confident = False                        # changes what's there: the owner decides
+            if used != core and got.get("street"):
+                a["street"] = "\n".join([got["street"] + (f" {unit}" if unit else "")] + lines[1:])
+                how.append(f"street put in order as the Census Bureau knows it ({got['street']})")
+                confident = False
+        elif needs_lookup(a):
             how.append("no match found: fill in by hand if you like")
             confident = False
     if (a.get("street") or "").strip() and not all((a.get(k) or "").strip() for k in ("city", "region", "postal")):
