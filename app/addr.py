@@ -216,7 +216,7 @@ def osm(a, timeout=20):
         return None
     params = {"street": core, "city": a["city"].strip(), "state": a.get("region") or "", "country": "us",
               "format": "jsonv2", "addressdetails": "1", "limit": "2"}
-    key = "osm|" + "|".join(params[k] for k in ("street", "city", "state")).lower()
+    key = "osm2|" + "|".join(params[k] for k in ("street", "city", "state")).lower()
     row = (store.q("SELECT result FROM addr_cache WHERE q=?", (key,)) or [None])[0]
     if row:
         return json.loads(row["result"])
@@ -229,16 +229,29 @@ def osm(a, timeout=20):
         finally:
             _osm_last[0] = time.time()
     out = None
-    hits = [h for h in (r if isinstance(r, list) else []) if (h.get("address") or {}).get("house_number") == num.group(0)
+    r = r if isinstance(r, list) else []
+    hits = [h for h in r if (h.get("address") or {}).get("house_number") == num.group(0)
             and (h.get("address") or {}).get("postcode")]
+    if not hits:
+        # OpenStreetMap often knows the road but not every house number (rural): the road's ZIP will do,
+        # when the street name matches (ignoring N/S/E/W and Dr/Drive) and there's one ZIP only
+        name = _name_words(core[len(num.group(0)):])
+        hits = [h for h in r if not (h.get("address") or {}).get("house_number") and (h.get("address") or {}).get("postcode")
+                and name and _name_words((h.get("address") or {}).get("road") or "") == name]
     if len({h["address"]["postcode"][:5] for h in hits}) == 1:      # one clear ZIP only
         ad = hits[0]["address"]
-        street = f"{ad['house_number']} {ad.get('road', '')}".strip()
+        street = f"{num.group(0)} {ad.get('road', '')}".strip()
         town = ad.get("city") or ad.get("town") or ad.get("village") or ad.get("hamlet") or ""
         out = {"city": town, "region": state_code(ad.get("state") or ""), "postal": ad["postcode"][:5],
                "matched": hits[0].get("display_name") or street, "street": _osm_street(street)}
     store.x("INSERT OR REPLACE INTO addr_cache(q, result, ts) VALUES(?,?,?)", (key, json.dumps(out), time.time()))
     return out
+
+
+def _name_words(s):
+    """The street's name alone: 'East Palm-ish Drive' and 'Palm-ish Dr' both -> ['palm-ish']."""
+    drop = {"n", "s", "e", "w", "ne", "nw", "se", "sw"} | {_ABBR.get(t, t) for t in STREET_TYPES}
+    return [w for w in _street_words(s) if w not in drop]
 
 
 def _osm_street(s):

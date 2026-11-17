@@ -270,6 +270,19 @@ def test_openstreetmap_after_census_miss():
     finally:
         net.request = real
 
+    def road_only(method, url, **kw):                 # knows the road, not the house number
+        if "census.gov" in url:
+            return {"result": {"addressMatches": []}}
+        return [{"address": {"road": "East Sample Grove Drive", "town": "Smallton", "postcode": "90014"}}]
+    net.request = road_only
+    try:
+        a, how, ok = addr.fix(A("4040 Sample Grove Dr", "Smallton", "CA", ""), osm_lookup=True)
+        assert (a["street"], a["postal"]) == ("4040 E Sample Grove Dr", "90014") and not ok, (a, how)
+        a, how, ok = addr.fix(A("4041 Other Grove Dr", "Smallton", "CA", ""), osm_lookup=True)   # other name: no
+        assert not a["postal"]
+    finally:
+        net.request = real
+
 
 def test_street_differs():
     assert addr.street_differs("Suite K 47 S. Example Elm", "47 N Example Elms Dr")
