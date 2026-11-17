@@ -1,10 +1,14 @@
 """Tiny HTTP client on the standard library.
 
-READ-ONLY GUARD: until the write phase exists, the only non-GET requests this app may send are
-OAuth sign-in / token calls. Anything else raises before it leaves the container, so a bug cannot
-change a contact.
+WRITE GUARD: besides reads and OAuth sign-in/token calls, the only requests this app may send are
+the contact create/update/delete calls listed in WRITE_PATTERNS, and only from code running inside
+`with net.writes_allowed():` (writer.py, which also checks the write mode and saves a copy first).
+Anything else raises before it leaves the container.
 """
+import contextlib
 import json
+import re
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -37,12 +41,35 @@ class WriteBlocked(Exception):
     pass
 
 
+WRITE_PATTERNS = [
+    ("POST", r"https://graph\.microsoft\.com/v1\.0/me/contacts"),
+    ("PATCH", r"https://graph\.microsoft\.com/v1\.0/me/contacts/[^/?]+"),
+    ("DELETE", r"https://graph\.microsoft\.com/v1\.0/me/contacts/[^/?]+"),
+    ("POST", r"https://people\.googleapis\.com/v1/people:createContact(\?[^/]*)?"),
+    ("PATCH", r"https://people\.googleapis\.com/v1/people/[A-Za-z0-9_-]+:updateContact\?[^/]*"),
+    ("DELETE", r"https://people\.googleapis\.com/v1/people/[A-Za-z0-9_-]+:deleteContact"),
+]
+_write = threading.local()
+
+
+@contextlib.contextmanager
+def writes_allowed():
+    """Contact writes are only possible inside this block, on this thread."""
+    _write.on = True
+    try:
+        yield
+    finally:
+        _write.on = False
+
+
 def check_allowed(method, url):
     if method == "GET":
         return
     if method == "POST" and url.startswith(ALLOWED_POST_PREFIXES):
         return
-    raise WriteBlocked(f"read-only build: refused {method} {url.split('?')[0]}")
+    if getattr(_write, "on", False) and any(m == method and re.fullmatch(p, url) for m, p in WRITE_PATTERNS):
+        return
+    raise WriteBlocked(f"write refused: {method} {url.split('?')[0]}")
 
 
 def request(method, url, *, form=None, body=None, headers=None, timeout=60, retries=4):

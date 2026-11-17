@@ -20,6 +20,7 @@ import store
 import tls
 import webauthn
 import web
+import writer
 from jobs import Runner
 from version import VERSION
 
@@ -70,7 +71,7 @@ def scheduler():
 def status_json():
     last = (store.q("SELECT * FROM runs ORDER BY id DESC LIMIT 1") or [None])[0]
     r = runner.report
-    return {"version": VERSION, "read_only": True,
+    return {"version": VERSION, "write_mode": writer.mode(),
             "microsoft": msgraph.status(), "google": google.status(), "job": runner.progress,
             "last_run": last, "report_counts": r["counts"] if r else None,
             "report_created": r.get("created") if r else None, "next_backup": next_backup_text()}
@@ -87,6 +88,27 @@ class Server(ThreadingHTTPServer):
             log.debug("connection from %s dropped: %s", client_address[0], err)
             return
         super().handle_error(request, client_address)
+
+
+def _person(key):
+    return next((x for x in (runner.report or {}).get("people", []) if x["key"] == key), None)
+
+
+def _best(p):
+    """Editable record from a fresh read of the most recently changed copy of a person (never
+    from the report, which may be older or from a version without every field)."""
+    import model
+    fresh = [writer._fresh(m)[1] for m in p["members"]]
+    return model.editable(max(fresh, key=lambda c: c.get("updated") or ""))
+
+
+def _refresh():
+    """After a change: re-read so the pages show it (Google can take a few seconds to list it)."""
+    try:
+        time.sleep(1.5)
+        runner.refresh()
+    except Exception:
+        log.exception("refresh after a change failed")
 
 
 def _site():
@@ -212,17 +234,31 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/contacts":
             return self._send(200, web.contacts_page(runner.report, qs.get("q", [""])[0].strip()[:100],
                                                      qs.get("show", [""])[0]))
-        m = re.fullmatch(r"/contacts/([0-9a-f]{12})", path)
+        m = re.fullmatch(r"/contacts/([0-9a-f]{12})(/edit)?", path)
         if m:
-            p = next((x for x in (runner.report or {}).get("people", []) if x["key"] == m.group(1)), None)
+            p = _person(m.group(1))
             if not p:
                 return self._send(404, web.page("Not found", "/contacts", "<h1>Not found</h1><p>That contact isn't in "
-                                                "the latest backup. <a href='/contacts'>Back to Contacts</a></p>"))
-            return self._send(200, web.contact_page(p, runner.report))
+                                                "the latest copy. <a href='/contacts'>Back to Contacts</a></p>"))
+            if m.group(2):
+                return self._send(200, web.contact_edit_page(p, _best(p), write_mode=writer.mode()))
+            return self._send(200, web.contact_page(p, runner.report, writer.history([c["id"] for c in p["members"]]),
+                                                    msg=qs.get("msg", [""])[0][:500], error=qs.get("error", [""])[0][:500],
+                                                    write_mode=writer.mode()))
+        if path == "/bin":
+            return self._send(200, web.bin_page(writer.bin_items(), qs.get("msg", [""])[0][:300],
+                                                qs.get("error", [""])[0][:300], writer.mode()))
         if path == "/api/contacts":
             q = qs.get("q", [""])[0].strip()
             people = [x for x in (runner.report or {}).get("people", []) if web._match(x, q)]
-            return self._json({"count": len(people), "people": people[:200]})
+            return self._json({"count": len(people), "people": people[:200], "write_mode": writer.mode()})
+        m = re.fullmatch(r"/api/contacts/([0-9a-f]{12})/history", path)
+        if m:
+            p = _person(m.group(1))
+            return self._json(writer.history([c["id"] for c in p["members"]]) if p else {"error": "not found"},
+                              200 if p else 404)
+        if path == "/api/bin":
+            return self._json([{k: v for k, v in it.items() if k not in ("ms_raw", "g_raw")} for it in writer.bin_items()])
         if path == "/backups":
             return self._send(200, web.backups_page(backup.listing()))
         m = re.fullmatch(r"/backups/([^/]+)/([^/]+)", path)
@@ -302,6 +338,100 @@ class Handler(BaseHTTPRequestHandler):
             auth.note_failure(ip)
             log.warning("passkey check failed from %s: %s", ip, e)
             return self._json({"error": str(e)}, 400)
+        return self._json({"error": "not found"}, 404)
+
+    def _contact_write(self, path, f):
+        """Edit / delete / restore from the pages (signed in). Returns None if the path isn't one of these."""
+        m = re.fullmatch(r"/contacts/([0-9a-f]{12})/(edit|delete|history/(\d+)/restore)", path)
+        if m:
+            key, what = m.group(1), m.group(2)
+            p = _person(key)
+            if not p:
+                return self._redirect("/contacts")
+            back = lambda q: self._redirect(f"/contacts/{key}?" + urllib.parse.urlencode(q))
+            try:
+                if what == "edit":
+                    try:
+                        rec = web.parse_edit_form(f)
+                    except ValueError as e:
+                        return self._send(400, web.contact_edit_page(p, _best(p), str(e), writer.mode()))
+                    warns = writer.update(p["members"], rec)
+                    _refresh()
+                    newp = next((x for x in runner.report.get("people", []) if
+                                 {c["id"] for c in x["members"]} & {c["id"] for c in p["members"]}), None)
+                    dest = f"/contacts/{newp['key']}" if newp else "/contacts"
+                    msg = "Saved to both." + (" " + " ".join(warns) if warns else "")
+                    return self._redirect(dest + "?" + urllib.parse.urlencode({"msg": msg}))
+                if what == "delete":
+                    bin_id = writer.delete(p["members"])
+                    _refresh()
+                    return self._redirect("/bin?" + urllib.parse.urlencode(
+                        {"msg": f"Deleted “{p['name']}” from both accounts. It's in the recycle bin (#{bin_id})."}))
+                warns = writer.restore_version(int(m.group(3)), p["members"])
+                _refresh()
+                return back({"msg": "Earlier version restored on both sides." + (" " + " ".join(warns) if warns else "")})
+            except writer.Refused as e:
+                return back({"error": str(e)})
+            except Exception as e:
+                log.exception("contact write failed")
+                return back({"error": f"Failed: {e}"[:400]})
+        m = re.fullmatch(r"/bin/(\d+)/restore", path)
+        if m:
+            try:
+                ids, warns = writer.restore_bin(int(m.group(1)))
+            except (writer.Refused, Exception) as e:
+                log.exception("restore failed")
+                return self._redirect("/bin?" + urllib.parse.urlencode({"error": str(e)[:400]}))
+            _refresh()
+            return self._redirect("/bin?" + urllib.parse.urlencode(
+                {"msg": "Restored to " + " and ".join("Microsoft 365" if s == "microsoft" else "Google" for s in ids)
+                 + "." + (" " + " ".join(warns) if warns else "")}))
+        if path == "/test-contact":
+            try:
+                writer.create(dict(writer.TEST_REC))
+            except Exception as e:
+                return self._redirect("/settings?" + urllib.parse.urlencode({"error": str(e)[:400]}))
+            _refresh()
+            return self._redirect("/contacts?q=Contact-Sync")
+        return None
+
+    def _api_write(self, path, raw):
+        """The same actions for scripts with an API key, always limited to test contacts."""
+        try:
+            body = json.loads(raw or b"{}")
+        except ValueError:
+            return self._json({"error": "bad JSON"}, 400)
+        try:
+            with writer.test_only():
+                if path == "/api/test-contact":
+                    ids, warns = writer.create(dict(writer.TEST_REC))
+                    _refresh()
+                    return self._json({"ids": ids, "warnings": warns})
+                m = re.fullmatch(r"/api/contacts/([0-9a-f]{12})/(edit|delete|history/(\d+)/restore)", path)
+                if m:
+                    p = _person(m.group(1))
+                    if not p:
+                        return self._json({"error": "not found"}, 404)
+                    if m.group(2) == "edit":
+                        rec = _best(p)
+                        rec.update({k: v for k, v in body.items() if k in rec})
+                        warns = writer.update(p["members"], rec)
+                    elif m.group(2) == "delete":
+                        warns = {"bin_id": writer.delete(p["members"])}
+                    else:
+                        warns = writer.restore_version(int(m.group(3)), p["members"])
+                    _refresh()
+                    return self._json({"ok": True, "result": warns})
+                m = re.fullmatch(r"/api/bin/(\d+)/restore", path)
+                if m:
+                    ids, warns = writer.restore_bin(int(m.group(1)))
+                    _refresh()
+                    return self._json({"ids": ids, "warnings": warns})
+        except writer.Refused as e:
+            return self._json({"error": str(e)}, 403)
+        except Exception as e:
+            log.exception("API write failed")
+            return self._json({"error": str(e)[:400]}, 500)
         return self._json({"error": "not found"}, 404)
 
     def do_POST(self):
@@ -389,11 +519,19 @@ class Handler(BaseHTTPRequestHandler):
                 region = (f("default_region") or "US").strip().upper()
                 if not re.fullmatch(r"[A-Z]{2}", region):
                     raise ValueError("Country must be two letters, like US")
-                new.update(backup_time=t, keep_days=keep, default_region=region)
+                wm = f("write_mode") or s.get("write_mode", "test")
+                if wm not in writer.MODES:
+                    raise ValueError("Unknown write mode")
+                new.update(backup_time=t, keep_days=keep, default_region=region, write_mode=wm)
             except ValueError as e:
                 return self._send(400, web.settings_page(s, self._access(), error=str(e), cert=tls.fingerprint()))
             store.save_settings(new)
             return self._redirect("/settings?saved=1")
+        if path.startswith("/api/") and path != "/api/run":
+            return self._api_write(path, raw)
+        r = self._contact_write(path, f)
+        if r is not None:
+            return r
         if path in ("/run", "/api/run"):
             started = runner.start("manual" if path == "/run" else "api")
             return self._json({"started": started, "job": runner.progress}) if path == "/api/run" else self._redirect("/")
@@ -419,6 +557,8 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     store.init()
+    writer.init()
+    writer.prune()
     store.x("UPDATE runs SET finished=started, error='Interrupted (container restarted)' WHERE finished IS NULL")
     if not os.path.exists(store.SETTINGS_PATH):
         store.save_settings(store.load_settings())

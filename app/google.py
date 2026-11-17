@@ -9,6 +9,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 import threading
 import time
@@ -148,6 +149,36 @@ def access_token():
 
 def get(url):
     return net.request("GET", url, headers={"Authorization": f"Bearer {access_token()}"})
+
+
+def _send(method, url, body=None):
+    return net.request(method, url, body=body, headers={"Authorization": f"Bearer {access_token()}"})
+
+
+def _rn(resource_name):
+    if not re.fullmatch(r"people/[A-Za-z0-9_-]+", resource_name or ""):
+        raise ValueError(f"not a contact id: {resource_name!r}")
+    return resource_name
+
+
+def get_person(resource_name):
+    return get(f"{PEOPLE}/{_rn(resource_name)}?personFields={PERSON_FIELDS}")
+
+
+def create_person(body):
+    """Only works inside net.writes_allowed() (see writer.py)."""
+    return _send("POST", f"{PEOPLE}/people:createContact?personFields={PERSON_FIELDS}", body)
+
+
+def update_person(resource_name, body, fields):
+    """body must carry the current etag."""
+    return _send("PATCH", f"{PEOPLE}/{_rn(resource_name)}:updateContact?updatePersonFields={fields}"
+                          f"&personFields={PERSON_FIELDS}", body)
+
+
+def delete_person(resource_name):
+    """Google moves it to Trash (kept 30 days)."""
+    return _send("DELETE", f"{PEOPLE}/{_rn(resource_name)}:deleteContact")
 
 
 def fetch_all():

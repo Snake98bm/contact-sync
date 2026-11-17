@@ -113,6 +113,32 @@ def get(url):
                                             "Prefer": 'outlook.body-content-type="text"'})
 
 
+def _send(method, url, body=None):
+    return net.request(method, url, body=body, headers={"Authorization": f"Bearer {access_token()}"})
+
+
+def _cid(cid):
+    return urllib.parse.quote(cid, safe="")
+
+
+def get_contact(cid):
+    return get(f"{GRAPH}/me/contacts/{_cid(cid)}")
+
+
+def create_contact(body):
+    """Only works inside net.writes_allowed() (see writer.py)."""
+    return _send("POST", f"{GRAPH}/me/contacts", body)
+
+
+def update_contact(cid, body):
+    return _send("PATCH", f"{GRAPH}/me/contacts/{_cid(cid)}", body)
+
+
+def delete_contact(cid):
+    """Outlook moves it to Deleted Items."""
+    return _send("DELETE", f"{GRAPH}/me/contacts/{_cid(cid)}")
+
+
 def _paged(url):
     out = []
     while url:

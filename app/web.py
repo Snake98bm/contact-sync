@@ -1,6 +1,7 @@
 """Server-rendered pages."""
 import html
 import json
+import re
 import time
 
 from version import VERSION
@@ -69,7 +70,7 @@ def pill(text, cls):
 
 
 def page(title, active, body, refresh=False, nav_on=True):
-    links = [("/", "Dashboard"), ("/contacts", "Contacts"), ("/report", "Cleanup report"), ("/backups", "Backups"),
+    links = [("/", "Dashboard"), ("/contacts", "Contacts"), ("/report", "Cleanup report"), ("/bin", "Recycle bin"), ("/backups", "Backups"),
              ("/settings", "Settings")]
     nav = ""
     if nav_on:
@@ -88,8 +89,8 @@ catch(e){}},2500)</script>"""
 <meta name="theme-color" content="#0d8078"><meta name="apple-mobile-web-app-title" content="Contacts">
 <style>{CSS}</style></head><body><header><div class="wrap top"><div class="brand"><img src="/favicon.svg" alt="">
 Contact Sync</div><nav>{nav}</nav></div></header><main class="wrap">{body}
-<p class="muted small" style="margin-top:40px">contact-sync {VERSION} · read-only build: it reads and backs up,
-it never changes either account.</p></main>{js}</body></html>"""
+<p class="muted small" style="margin-top:40px">contact-sync {VERSION} · changes are made only from Contacts and the
+recycle bin, and every change keeps a copy first.</p></main>{js}</body></html>"""
 
 
 PASSKEY_JS = """<script>
@@ -458,7 +459,15 @@ minlength="{access['min_len']}"><label>Again</label><input type="password" name=
 <label>Keep backups for (days)</label><input type="number" name="keep_days" min="3" max="365" value="{s['keep_days']}">
 <label>Country for phone numbers without a code</label><input type="text" name="default_region" maxlength="2"
 value="{esc(s['default_region'])}"><div class="hint">Two letters, e.g. US, CA, GB, AU.</div>
+<label>Write mode</label>
+<select name="write_mode" style="padding:7px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--text)">
+<option value="off"{' selected' if s.get('write_mode') == 'off' else ''}>Off: nothing is changed in your accounts</option>
+<option value="test"{' selected' if s.get('write_mode', 'test') == 'test' else ''}>Test: only contacts named “Contact-Sync Test…”</option>
+<option value="on"{' selected' if s.get('write_mode') == 'on' else ''}>On: any contact can be edited, deleted and restored</option>
+</select><div class="hint">Every change keeps a copy first (history or recycle bin), so it can be undone.</div>
 <p><button>Save</button></p></form>
+<form method="post" action="/test-contact" style="margin-top:6px"><button class="ghost" style="padding:0">Create a
+“Contact-Sync Test” contact in both accounts</button></form>
 
 <h2>Passkeys</h2><div class="card"><table><tr><th>Name</th><th>Added</th><th>Last used</th><th></th></tr>
 {pk_rows}</table></div>
@@ -544,8 +553,8 @@ def contacts_page(r, q="", show=""):
                     f"<td class='small num'>{'<br>'.join(esc(x) for x in phones[:2])}</td><td>{_status(p)}</td></tr>")
     sel = lambda v: " selected" if show == v else ""
     body = f"""<h1>Contacts</h1>
-<p class="sub">From the backup of {when(r.get('created'))}. Viewing only for now: editing, deleting and restoring
-come with the write phase.</p>
+<p class="sub">From the backup of {when(r.get('created'))}.
+</p>
 <form method="get" action="/contacts" class="bar"><input type="text" name="q" value="{esc(q)}" class="wide"
 style="max-width:360px" placeholder="Search name, company, email or phone" autofocus>
 <select name="show" style="padding:7px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--text)">
@@ -566,7 +575,7 @@ FIELDS = [("Name", lambda c: c["name"]), ("Shown as", lambda c: c.get("shown_as"
           ("Last changed", lambda c: (c.get("updated") or "")[:16].replace("T", " "))]
 
 
-def contact_page(p, r):
+def contact_page(p, r, history=(), msg="", error="", write_mode="off"):
     cols = p["members"]
     head = "".join(f"<th>{pill(*SIDE[c['side']])}</th>" for c in cols)
     rows = []
@@ -576,7 +585,8 @@ def contact_page(p, r):
             continue
         norm = {" ".join(v.lower().split()) for v in vals}
         differ = len(cols) > 1 and len(norm) > 1
-        tds = "".join(f"<td style='white-space:pre-wrap'{' class=\"diff\"' if differ else ''}>{esc(v)}</td>" for v in vals)
+        cls = ' class="diff"' if differ else ""
+        tds = "".join(f"<td style='white-space:pre-wrap'{cls}>{esc(v)}</td>" for v in vals)
         rows.append(f"<tr><th style='text-transform:none;font-size:13px'>{esc(label)}</th>{tds}</tr>")
     notes = []
     keys = {(c["side"], c["id"]) for c in cols}
@@ -589,11 +599,144 @@ def contact_page(p, r):
             others = [c["name"] for c in s["contacts"] if (c["side"], c["id"]) not in keys]
             notes.append(f"<li>Shares {esc(s['kind'])} {esc(s['value'])} with {esc(', '.join(sorted(set(others))))} "
                          "(not merged)</li>")
-    body = f"""<p><a href="/contacts">← Contacts</a></p><h1>{esc(p['name'] or '(no name)')}</h1>
-<p class="sub">{_status(p)}</p>
-{'<div class="banner warnb"><ul style="margin:0;padding-left:18px">' + ''.join(notes) + '</ul></div>' if notes else ''}
-<div class="card"><table><tr><th></th>{head}</tr>{''.join(rows)}</table></div>
-<p class="muted small">Fields that differ between the copies are highlighted. Edit, delete and restore arrive with the
-write phase.</p>
-<style>td.diff{{background:var(--warnbg)}}</style>"""
+    key = esc(p["key"])
+    dup = p["ms"] > 1 or p["google"] > 1
+    confirm_delete = ("return confirm('Delete this contact from both Microsoft 365 and Google? It goes to the "
+                      "recycle bin for 90 days and can be restored.')")
+    if write_mode != "off" and not dup:
+        actions = (f'<div class="bar" style="margin:14px 0"><a class="btn" href="/contacts/{key}/edit">Edit</a>'
+                   f'<form method="post" action="/contacts/{key}/delete" class="inline" onsubmit="{confirm_delete}">'
+                   f'<button class="ghost" style="color:var(--bad)">Delete from both</button></form></div>')
+    elif dup:
+        actions = '<p class="small muted">Duplicate copies on one side: edit and delete wait until they are merged.</p>'
+    else:
+        actions = '<p class="small muted">Writing is off (Settings → Write mode).</p>'
+    hist = ""
+    if history:
+        hrows = []
+        confirm_restore = "return confirm('Put this earlier version back on both sides?')"
+        for h in history:
+            btn = ""
+            if h["has_before"] and h["action"] in ("edit", "restore") and write_mode != "off" and not dup:
+                btn = (f'<form method="post" action="/contacts/{key}/history/{h["id"]}/restore" class="inline" '
+                       f'onsubmit="{confirm_restore}"><button class="ghost">Restore this version</button></form>')
+            hrows.append(f"<tr><td class='num'>{when(h['ts'])}</td><td>{esc(h['action'])}</td>"
+                         f"<td>{pill(*SIDE[h['side']])}</td><td class='small'>{esc(h['note'] or '')}</td><td>{btn}</td></tr>")
+        hist = ("<h2>History</h2><p class='muted small'>“Restore this version” puts the contact back the way it was "
+                "<b>before</b> that change.</p><div class='card'><table><tr><th>When</th><th>Change</th><th>Side</th>"
+                "<th>Note</th><th></th></tr>" + "".join(hrows) + "</table></div>")
+    banner_notes = ('<div class="banner warnb"><ul style="margin:0;padding-left:18px">' + "".join(notes)
+                    + "</ul></div>") if notes else ""
+    body = (f'<p><a href="/contacts">← Contacts</a></p><h1>{esc(p["name"] or "(no name)")}</h1>'
+            f'<p class="sub">{_status(p)}</p>'
+            + (f'<div class="banner">{esc(msg)}</div>' if msg else "")
+            + (f'<div class="banner err">{esc(error)}</div>' if error else "")
+            + banner_notes + actions
+            + f'<div class="card"><table><tr><th></th>{head}</tr>{"".join(rows)}</table></div>'
+            + '<p class="muted small">Fields that differ between the copies are highlighted.</p>' + hist
+            + "<style>td.diff{background:var(--warnbg)}</style>")
     return page(p["name"] or "Contact", "/contacts", body)
+
+
+PHONE_TYPES = ("mobile", "home", "work", "main", "other")
+
+
+def contact_edit_page(p, rec, error="", write_mode="test"):
+    def v(k):
+        return esc(rec.get(k) or "")
+    key = esc(p["key"])
+    phones = "\n".join(f"{x['value']} | {x.get('type') or 'other'}" for x in rec.get("phones") or [])
+    emails = "\n".join(rec.get("emails") or [])
+    by_type = {a.get("type"): a for a in rec.get("addr") or []}
+    addr_html = ""
+    for t, label in (("home", "Home"), ("work", "Work / business"), ("other", "Other")):
+        a = by_type.get(t, {})
+        addr_html += (
+            f'<div class="card pad"><b>{label} address</b>'
+            f'<label>Street</label><textarea name="{t}_street" rows="2" style="width:100%">{esc(a.get("street", ""))}</textarea>'
+            f'<div class="bar"><div><label>City</label><input type="text" name="{t}_city" value="{esc(a.get("city", ""))}"></div>'
+            f'<div><label>State</label><input type="text" name="{t}_region" value="{esc(a.get("region", ""))}" style="width:80px"></div>'
+            f'<div><label>ZIP</label><input type="text" name="{t}_postal" value="{esc(a.get("postal", ""))}" style="width:100px"></div>'
+            f'<div><label>Country</label><input type="text" name="{t}_country" value="{esc(a.get("country", ""))}" '
+            f'style="width:120px"></div></div></div>')
+    sides = " and ".join("Microsoft 365" if c["side"] == "microsoft" else "Google" for c in p["members"])
+    test_note = ('<div class="banner warnb">Write mode is “test”: only contacts named “Contact-Sync Test…” can be '
+                 'saved.</div>') if write_mode == "test" else ""
+    body = (
+        f'<p><a href="/contacts/{key}">← {esc(p["name"] or "Contact")}</a></p><h1>Edit contact</h1>'
+        f'<p class="sub">Saved to {esc(sides)}. The current version is kept in the history first, so this can be undone.</p>'
+        + (f'<div class="banner err">{esc(error)}</div>' if error else "") + test_note
+        + f'<form method="post" action="/contacts/{key}/edit">'
+        f'<div class="bar"><div><label>First</label><input type="text" name="given" value="{v("given")}"></div>'
+        f'<div><label>Middle</label><input type="text" name="middle" value="{v("middle")}"></div>'
+        f'<div><label>Last</label><input type="text" name="family" value="{v("family")}"></div></div>'
+        f'<div class="bar"><div><label>Company</label><input type="text" name="company" value="{v("company")}" style="width:260px"></div>'
+        f'<div><label>Job title</label><input type="text" name="title" value="{v("title")}" style="width:220px"></div></div>'
+        f'<label>Emails</label><textarea name="emails" rows="3" style="width:100%;max-width:480px">{esc(emails)}</textarea>'
+        f'<div class="hint">One per line. Outlook keeps up to 3.</div>'
+        f'<label>Phones</label><textarea name="phones" rows="4" style="width:100%;max-width:480px">{esc(phones)}</textarea>'
+        f'<div class="hint">One per line as <code>number | type</code>; type is one of {", ".join(PHONE_TYPES)}.</div>'
+        f'<div class="grid2" style="margin-top:14px">{addr_html}</div>'
+        f'<label>Birthday</label><input type="text" name="birthday" value="{v("birthday")}" placeholder="YYYY-MM-DD or --MM-DD">'
+        f'<label>Notes</label><textarea name="notes" rows="6" style="width:100%">{v("notes")}</textarea>'
+        f'<p><button>Save to both</button> <a href="/contacts/{key}" style="margin-left:12px">Cancel</a></p></form>'
+        "<style>textarea{padding:7px 9px;border:1px solid var(--line);border-radius:8px;background:var(--bg);"
+        "color:var(--text);font:inherit}</style>")
+    return page("Edit", "/contacts", body)
+
+
+def parse_edit_form(f):
+    """Form fields -> editable record (see model.EDIT_FIELDS). Raises ValueError for bad input."""
+    rec = {k: (f(k) or "").strip() for k in ("given", "middle", "family", "company", "title", "birthday")}
+    rec["notes"] = (f("notes") or "").replace("\r\n", "\n").strip()
+    rec["emails"] = [e.strip() for e in (f("emails") or "").splitlines() if e.strip()]
+    for e in rec["emails"]:
+        if "@" not in e or " " in e:
+            raise ValueError(f"“{e}” doesn't look like an email address.")
+    rec["phones"] = []
+    for line in (f("phones") or "").splitlines():
+        if not line.strip():
+            continue
+        num, _, typ = line.partition("|")
+        typ = typ.strip().lower() or "mobile"
+        if typ not in PHONE_TYPES:
+            raise ValueError(f"Phone type “{typ}” isn't one of: {', '.join(PHONE_TYPES)}.")
+        rec["phones"].append({"value": num.strip(), "type": typ})
+    rec["addr"] = []
+    for t in ("home", "work", "other"):
+        a = {"type": t, "street": (f(f"{t}_street") or "").replace("\r\n", "\n").strip()}
+        a.update({k: (f(f"{t}_{k}") or "").strip() for k in ("city", "region", "postal", "country")})
+        if any(a[k] for k in ("street", "city", "region", "postal", "country")):
+            rec["addr"].append(a)
+    b = rec["birthday"]
+    if b and not (re.fullmatch(r"\d{4}-\d{2}-\d{2}", b) or re.fullmatch(r"--\d{2}-\d{2}", b)):
+        raise ValueError("Birthday must look like 1980-02-03, or --02-03 without a year.")
+    if not (rec["given"] or rec["family"] or rec["company"]):
+        raise ValueError("Give a first name, last name or company.")
+    return rec
+
+
+def bin_page(items, msg="", error="", write_mode="off"):
+    rows = []
+    for it in items:
+        sides = []
+        if json.loads(it["ms_raw"] or "[]"):
+            sides.append(pill(*SIDE["microsoft"]))
+        if json.loads(it["g_raw"] or "[]"):
+            sides.append(pill(*SIDE["google"]))
+        if it["restored"]:
+            act = f"<span class='muted small'>Restored {when(it['restored'])}</span>"
+        elif write_mode == "off":
+            act = "<span class='muted small'>Writing is off</span>"
+        else:
+            act = (f"<form method='post' action='/bin/{it['id']}/restore' class='inline'>"
+                   f"<button class='ghost'>Restore to both</button></form>")
+        rows.append(f"<tr><td>{esc(it['name'])}</td><td class='num'>{when(it['ts'])}</td><td>{' '.join(sides)}</td>"
+                    f"<td>{act}</td></tr>")
+    body = ("<h1>Recycle bin</h1><p class='sub'>Contacts deleted through contact-sync, with both sides' data. Kept 90 "
+            "days. Restoring creates the contact again in Microsoft 365 and Google (photos and group memberships are "
+            "not restored).</p>"
+            + (f'<div class="banner">{esc(msg)}</div>' if msg else "")
+            + (f'<div class="banner err">{esc(error)}</div>' if error else "")
+            + _section("items", "Deleted contacts", "", rows, ["Name", "Deleted", "Had copies in", ""]))
+    return page("Recycle bin", "/bin", body)

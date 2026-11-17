@@ -15,6 +15,7 @@ DEFAULT_SETTINGS = {
     "backup_time": "02:30",     # local time (TZ)
     "keep_days": 30,            # backups older than this are deleted
     "default_region": "US",     # country code assumed for phone numbers without one
+    "write_mode": "test",       # off / test (only "Contact-Sync Test..." contacts) / on
 }
 
 _lock = threading.Lock()
