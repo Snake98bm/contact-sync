@@ -181,6 +181,30 @@ def delete_person(resource_name):
     return _send("DELETE", f"{PEOPLE}/{_rn(resource_name)}:deleteContact")
 
 
+def photo_url(raw):
+    """URL of the contact's own photo (not Google's letter placeholder), or None."""
+    for ph in raw.get("photos") or []:
+        if not ph.get("default") and ph.get("url"):
+            # ask for a large version rather than the 100 px default
+            return re.sub(r"=s\d+(-[a-z0-9-]+)?$", "=s1024", ph["url"])
+    return None
+
+
+def get_photo(raw):
+    """The contact's photo as bytes, or None. Google serves these from its own image host; no token
+    is sent there."""
+    url = photo_url(raw)
+    if not url or not re.match(r"https://[a-z0-9.-]+\.(googleusercontent|google)\.com/", url):
+        return None
+    return net.request_bytes("GET", url)
+
+
+def put_photo(resource_name, data):
+    """Only works inside net.writes_allowed()."""
+    return _send("PATCH", f"{PEOPLE}/{_rn(resource_name)}:updateContactPhoto",
+                 {"photoBytes": base64.b64encode(data).decode()})
+
+
 def group_members(group_rn):
     """resourceNames of the contacts in a label."""
     if not re.fullmatch(r"contactGroups/[A-Za-z0-9_-]+", group_rn or ""):

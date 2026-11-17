@@ -10,6 +10,7 @@
   restore only finishes the missing side.
 - Outlook also keeps deleted contacts in Deleted Items, and Google in Trash for 30 days.
 """
+import base64
 import json
 import logging
 import threading
@@ -52,6 +53,10 @@ def init():
         cols = {r[1] for r in db.execute("PRAGMA table_info(versions)")}
         if "batch" not in cols:                      # tables made by 0.5.0
             db.execute("ALTER TABLE versions ADD COLUMN batch TEXT")
+        bcols = {r[1] for r in db.execute("PRAGMA table_info(bin)")}
+        for col in ("ms_photo", "g_photo"):          # base64 photos, added in 0.9.0
+            if col not in bcols:
+                db.execute(f"ALTER TABLE bin ADD COLUMN {col} TEXT")
 
 
 def mode():
@@ -145,6 +150,35 @@ def _send(side, cid, rec=None, base=None, raw=None):
     return out, warn
 
 
+def get_photo(side, cid, raw=None):
+    """A contact's photo as bytes, or None (no photo, or it couldn't be read: a photo never blocks a delete)."""
+    try:
+        if side == "microsoft":
+            return msgraph.get_photo(cid)
+        return google.get_photo(raw if raw is not None else google.get_person(cid))
+    except Exception as e:
+        log.warning("couldn't read the photo of %s on %s: %s", cid[-12:], side, e)
+        return None
+
+
+def _image_type(data):
+    return "image/png" if data[:8] == b"\x89PNG\r\n\x1a\n" else "image/gif" if data[:3] == b"GIF" else "image/jpeg"
+
+
+def put_photo(side, cid, data):
+    """Upload a photo (inside the write guard). Errors are returned as a warning text, not raised."""
+    try:
+        with net.writes_allowed():
+            if side == "microsoft":
+                msgraph.put_photo(cid, data, _image_type(data))
+            else:
+                google.put_photo(cid, data)
+        return ""
+    except Exception as e:
+        log.warning("photo upload to %s failed: %s", side, e)
+        return f"the photo couldn't be put back ({e})"[:200]
+
+
 def _one_per_side(members):
     sides = [m["side"] for m in members]
     if len(sides) != len(set(sides)):
@@ -213,8 +247,16 @@ def delete(members, also_saved=None, note=""):
         ms_raw = [raw for m, raw, _ in fresh if m["side"] == "microsoft"] or list(also_saved.get("microsoft") or [])
         g_raw = [raw for m, raw, _ in fresh if m["side"] == "google"] or list(also_saved.get("google") or [])
         name = next((c["name"] for _, _, c in fresh if c["name"]), "(no name)")
-        bin_id = store.x("INSERT INTO bin(ts, name, ms_raw, g_raw) VALUES(?,?,?,?)",
-                         (time.time(), name, json.dumps(ms_raw), json.dumps(g_raw)))
+        photos = {}
+        for m, raw, _ in fresh:                       # keep the photos too: they aren't part of the contact data
+            data = get_photo(m["side"], m["id"], raw)
+            if data and m["side"] not in photos:
+                photos[m["side"]] = base64.b64encode(data).decode()
+        for side, data in (also_saved.get("photos") or {}).items():
+            photos.setdefault(side, data)
+        bin_id = store.x("INSERT INTO bin(ts, name, ms_raw, g_raw, ms_photo, g_photo) VALUES(?,?,?,?,?,?)",
+                         (time.time(), name, json.dumps(ms_raw), json.dumps(g_raw),
+                          photos.get("microsoft"), photos.get("google")))
         batch, done, removed = uuid.uuid4().hex, [], []
         try:
             for m, raw, c in fresh:
@@ -273,8 +315,21 @@ def restore_bin(bin_id):
                 _version(side, ids[side], row["name"], "restore", after=after, note=f"from recycle bin #{bin_id}",
                          batch=batch)
                 warnings += [f"{SIDE_NAME[side]}: {w}" for w in warn]
+                photo = row[f"{'ms' if side == 'microsoft' else 'g'}_photo"] or \
+                    row[f"{'g' if side == 'microsoft' else 'ms'}_photo"]       # its own photo, else the other side's
+                if photo:
+                    w = put_photo(side, ids[side], base64.b64decode(photo))
+                    if w:
+                        warnings.append(f"{SIDE_NAME[side]}: {w}")
             store.x("UPDATE bin SET restored=? WHERE id=?", (time.time(), bin_id))
         finally:
+            # both sides back (now or over several tries): hand both copies over together, so the sync
+            # links them as one person
+            if ids.get("microsoft") and ids.get("google"):
+                try:
+                    upserted = [(s, _fresh({"side": s, "id": ids[s]})[0]) for s in ("microsoft", "google")]
+                except Exception as e:
+                    log.warning("couldn't re-read the restored copies: %s", e)
             _notify(upserted=upserted)
         return ids, warnings
 

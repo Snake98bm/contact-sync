@@ -744,8 +744,8 @@ def bin_page(items, msg="", error="", write_mode="off"):
         rows.append(f"<tr><td>{esc(it['name'])}</td><td class='num'>{when(it['ts'])}</td><td>{' '.join(sides)}</td>"
                     f"<td>{act}</td></tr>")
     body = ("<h1>Recycle bin</h1><p class='sub'>Contacts deleted through contact-sync, with both sides' data. Kept 2 "
-            "years. Restoring creates the contact again in Microsoft 365 and Google (photos are not restored; everything "
-            "else, labels included, comes back as it was).</p>"
+            "years. Restoring creates the contact again in Microsoft 365 and Google (everything, the photo and "
+            "labels included, comes back as it was).</p>"
             + (f'<div class="banner">{esc(msg)}</div>' if msg else "")
             + (f'<div class="banner err">{esc(error)}</div>' if error else "")
             + _section("items", "Deleted contacts", "", rows, ["Name", "Deleted", "Had copies in", ""]))

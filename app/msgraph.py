@@ -139,6 +139,18 @@ def delete_contact(cid):
     return _send("DELETE", f"{GRAPH}/me/contacts/{_cid(cid)}")
 
 
+def get_photo(cid):
+    """The contact's photo as bytes, or None if it has none."""
+    return net.request_bytes("GET", f"{GRAPH}/me/contacts/{_cid(cid)}/photo/$value",
+                             headers={"Authorization": f"Bearer {access_token()}"})
+
+
+def put_photo(cid, data, content_type="image/jpeg"):
+    """Only works inside net.writes_allowed()."""
+    return net.request_bytes("PUT", f"{GRAPH}/me/contacts/{_cid(cid)}/photo/$value", data=data,
+                             content_type=content_type, headers={"Authorization": f"Bearer {access_token()}"})
+
+
 def _paged(url):
     out = []
     while url:

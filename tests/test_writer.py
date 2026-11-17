@@ -329,6 +329,29 @@ def test_restore_when_its_label_was_deleted():
     assert G[new_ids["google"]]["memberships"] == [] and any("label" in w for w in warns), warns
 
 
+def test_photos_survive_delete_and_restore():
+    set_mode("test")
+    PHOTOS = {}
+    msgraph.get_photo = lambda cid: PHOTOS.get(("m", cid))
+    google.get_photo = lambda raw: PHOTOS.get(("g", raw["resourceName"]))
+
+    def ms_put_photo(cid, data, ctype):
+        net.check_allowed("PUT", f"https://graph.microsoft.com/v1.0/me/contacts/{cid}/photo/$value")
+        PHOTOS[("m", cid)] = data
+
+    def g_put_photo(rn, data):
+        net.check_allowed("PATCH", f"https://people.googleapis.com/v1/{rn}:updateContactPhoto")
+        PHOTOS[("g", rn)] = data
+    msgraph.put_photo, google.put_photo = ms_put_photo, g_put_photo
+    ids, _ = writer.create(dict(writer.TEST_REC, emails=["photo@example.com"]))
+    PHOTOS[("g", ids["google"])] = b"\xff\xd8google-jpeg"              # only Google has a photo
+    bin_id = writer.delete(members(ids))
+    new_ids, warns = writer.restore_bin(bin_id)
+    assert PHOTOS[("g", new_ids["google"])] == b"\xff\xd8google-jpeg"
+    assert PHOTOS[("m", new_ids["microsoft"])] == b"\xff\xd8google-jpeg"   # Outlook gets it too
+    assert not [w for w in warns if "photo" in w], warns
+
+
 def test_edit_form_keeps_typed_input():
     form = {"given": "Contact-Sync", "family": "Test", "notes": "my long notes", "phones": "555 0100 | Cottage",
             "emails": "not an email"}

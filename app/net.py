@@ -48,6 +48,9 @@ WRITE_PATTERNS = [
     ("POST", r"https://people\.googleapis\.com/v1/people:createContact(\?[^/]*)?"),
     ("PATCH", r"https://people\.googleapis\.com/v1/people/[A-Za-z0-9_-]+:updateContact\?[^/]*"),
     ("DELETE", r"https://people\.googleapis\.com/v1/people/[A-Za-z0-9_-]+:deleteContact"),
+    # contact photos: upload to Outlook / Google
+    ("PUT", r"https://graph\.microsoft\.com/v1\.0/me/contacts/[^/?]+/photo/\$value"),
+    ("PATCH", r"https://people\.googleapis\.com/v1/people/[A-Za-z0-9_-]+:updateContactPhoto"),
     # deleting a Google label only with deleteContacts=false (contacts that are in no other group are
     # still removed by Google, so writer.delete_label first adds every member to My Contacts)
     ("DELETE", r"https://people\.googleapis\.com/v1/contactGroups/[A-Za-z0-9_-]+\?deleteContacts=false"),
@@ -107,6 +110,34 @@ def request(method, url, *, form=None, body=None, headers=None, timeout=60, retr
             raise HttpError(e.code, text, url) from None
         except (urllib.error.URLError, TimeoutError, ConnectionError):
             if repeatable and attempt < retries:
+                time.sleep(2 ** attempt * 2)
+                continue
+            raise
+
+
+def request_bytes(method, url, *, data=None, content_type=None, headers=None, timeout=60, retries=2):
+    """Like request(), for images: returns the body as bytes, or None for 404 (no photo).
+    Same write guard; GETs are retried on network errors and 5xx."""
+    check_allowed(method, url)
+    hdrs = {"User-Agent": USER_AGENT}
+    if content_type:
+        hdrs["Content-Type"] = content_type
+    hdrs.update(headers or {})
+    for attempt in range(retries + 1):
+        req = urllib.request.Request(url, data=data, headers=hdrs, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.read()
+        except urllib.error.HTTPError as e:
+            text = e.read().decode("utf-8", "replace")
+            if e.code == 404:
+                return None
+            if (e.code == 429 or (e.code >= 500 and method == "GET")) and attempt < retries:
+                time.sleep(2 ** attempt * 2)
+                continue
+            raise HttpError(e.code, text, url) from None
+        except (urllib.error.URLError, TimeoutError, ConnectionError):
+            if method == "GET" and attempt < retries:
                 time.sleep(2 ** attempt * 2)
                 continue
             raise
