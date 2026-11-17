@@ -306,7 +306,7 @@ def build_plan(progress=None):
                                              osm_lookup=lookup and osm_lookup)
             changed = any((after.get(x) or "") != (a.get(x) or "") for x in ("street", "city", "region", "postal", "country"))
             missing = [x for x in ("street", "city", "region", "postal") if not (after.get(x) or "").strip()]
-            if not changed and not missing:
+            if not changed:                          # nothing found to fix: not worth a row (Brad 2026-11-17)
                 continue
             detail = "; ".join(how) if how else ""
             if missing:

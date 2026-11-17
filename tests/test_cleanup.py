@@ -300,6 +300,18 @@ def test_shared_number_marked_right():
     assert not again, "asked again after it was marked right"
 
 
+def test_nothing_found_means_no_row():
+    mode("on")
+    ms("AAM-nofix", "Nofix", "Example", "nofix@example.com", homeAddress={"street": "just a note", "city": "", "state": ""})
+    real = addr.census
+    addr.census = lambda a, **kw: None                          # nothing known
+    try:
+        rows = [i for i in cleanup.build_plan()["items"] if i["kind"] == "address" and i["title"] == "Nofix Example"]
+    finally:
+        addr.census = real
+    assert not rows, rows
+
+
 def test_parallel_pieces():
     import threading
     import time as t
