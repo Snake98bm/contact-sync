@@ -1,5 +1,5 @@
 FROM python:3.13-alpine
-LABEL org.opencontainers.image.title="contact-sync" org.opencontainers.image.version="0.11.0" \
+LABEL org.opencontainers.image.title="contact-sync" org.opencontainers.image.version="0.11.1" \
       org.opencontainers.image.source="https://github.com/Snake98bm/contact-sync"
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 DATA_DIR=/data
 # su-exec: drop from root after the optional DHCP lease (see entry.sh)

@@ -2,6 +2,7 @@
 import os
 import sys
 import tempfile
+import urllib.parse
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "app"))
 os.environ["DATA_DIR"] = tempfile.mkdtemp()
@@ -73,6 +74,42 @@ def test_no_match_is_not_confident():
         assert not ok and not a["postal"] and "no match" in how[-1]
     finally:
         net.request = real
+
+
+def test_town_line_becomes_city():
+    def fake(method, url, **kw):
+        ok = "Springfield" in urllib.parse.unquote(url)
+        return {"result": {"addressMatches": [{"matchedAddress": "2932 EXAMPLE AVE, SPRINGFIELD, CA, 90000",
+                                               "addressComponents": {"city": "SPRINGFIELD", "state": "CA", "zip": "90000"}}]
+                           if ok else []}}
+    real, net.request = net.request, fake
+    try:
+        a, how, ok = addr.fix(A("2932 Example Ave\nSpringfield\nUnited States"))
+        assert (a["street"], a["city"], a["region"], a["postal"], a["country"]) == \
+            ("2932 Example Ave", "Springfield", "CA", "90000", "United States"), a
+        assert ok and "Census confirmed" in how[0], how
+        a, how, ok = addr.fix(A("1 Nowhere Rd\nShelbyville"))           # can't be confirmed: suggested, unticked
+        assert a["city"] == "Shelbyville" and a["street"] == "1 Nowhere Rd" and not ok and "check it" in how[0]
+        a, _, _ = addr.fix(A("1 Example St\nSuite 5"))                   # a suite line is never a city
+        assert a["street"] == "1 Example St\nSuite 5" and not a["city"]
+    finally:
+        net.request = real
+
+
+def test_incomplete_is_not_ticked():
+    a, how, ok = addr.fix(A("1 Example St", "Springfield", "", ""), lookup=False)
+    assert not ok
+
+
+def test_repeated_address_removed():
+    import cleanup
+    home = A("1 Example St", "Springfield", "CA", "")
+    fuller = A("1 Example St", "Springfield", "CA", "90000")
+    c = {"side": "google", "id": "people/c1", "name": "Jane Example", "shown_as": "", "given": "Jane", "middle": "",
+         "family": "Example", "company": "", "title": "", "emails": [], "phones": [], "addr": [home, fuller],
+         "addresses": [], "birthday": "", "notes": "", "groups": [], "updated": ""}
+    rec, reasons, _ = cleanup.tidy(c)
+    assert len(rec["addr"]) == 1 and rec["addr"][0]["postal"] == "90000" and "remove repeated address" in reasons
 
 
 if __name__ == "__main__":

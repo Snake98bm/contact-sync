@@ -80,7 +80,7 @@ router (`DHCP=1`, `DHCP_HOSTNAME`); see the comment at the top of `compose.yaml`
 ## Tests
 
 ```sh
-docker run --rm --entrypoint sh local/contact-sync:0.11.0 -c "python /tests/test_clean.py && python /tests/test_model.py && python /tests/test_webauthn.py && python /tests/test_access.py && python /tests/test_writer.py && python /tests/test_sync.py && python /tests/test_cleanup.py && python /tests/test_addr.py && python /tests/test_pages.py"
+docker run --rm --entrypoint sh local/contact-sync:0.11.1 -c "python /tests/test_clean.py && python /tests/test_model.py && python /tests/test_webauthn.py && python /tests/test_access.py && python /tests/test_writer.py && python /tests/test_sync.py && python /tests/test_cleanup.py && python /tests/test_addr.py && python /tests/test_pages.py"
 ```
 
 Tests use made-up contacts only.

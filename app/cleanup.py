@@ -67,6 +67,20 @@ def tidy(c, region="US"):
             reasons.append("remove “Contact Imported” block")
         else:
             reasons.append("keep “Contact Imported” block (its address isn't in the address fields)")
+    # the same address listed twice (left by an older sync tool): keep the most complete one
+    kept, repeats = [], 0
+    for a in rec.get("addr") or []:
+        key = (a.get("type"), _street_key(a))
+        same = next((k for k in kept if (k.get("type"), _street_key(k)) == key), None)
+        if same is None:
+            kept.append(dict(a))
+            continue
+        repeats += 1
+        if len(model.addr_line(a)) > len(model.addr_line(same)):
+            same.update(a)
+    if repeats:
+        rec["addr"] = kept
+        reasons.append(f"remove repeated address{'es' if repeats > 1 else ''}")
     comp = (rec.get("company") or "").strip()
     if comp and re.fullmatch(r"[\d\s().+\-]{7,}", comp) and len(re.sub(r"\D", "", comp)) >= 7:
         # a phone number typed into the company box: move it to the phones
@@ -262,7 +276,9 @@ def build_plan(progress=None):
         for c in p["members"]:
             for a in c.get("addr") or []:
                 k = (a.get("type"), _street_key(a))
-                seen_addr.setdefault(k, {"addr": a, "members": []})["members"].append(c)
+                g = seen_addr.setdefault(k, {"addr": a, "members": []})
+                if all(m is not c for m in g["members"]):      # a contact listing it twice counts once
+                    g["members"].append(c)
         for (typ, skey), g in seen_addr.items():
             a = g["addr"]
             after, how, confident = addr.fix(a, lookup=lookup)

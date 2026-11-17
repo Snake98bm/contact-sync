@@ -185,6 +185,25 @@ def fix(a, lookup=True):
     if (a.get("region") or "") != (before.get("region") or "") and "split the address out of the street box" not in how:
         how.append("state from ZIP" if not before.get("region") else "state as 2 letters")
     confident = True
+    # "2932 Example Ave / Springfield" with no state or ZIP: the last plain-words line is likely the city
+    lines = [ln.strip() for ln in (a.get("street") or "").split("\n") if ln.strip()]
+    if not (a.get("city") or "").strip() and len(lines) >= 2 and re.fullmatch(r"[A-Za-z][A-Za-z .'-]{1,29}", lines[-1]) \
+            and not re.search(r"\b(suite|ste|apt|unit|box|floor|fl|bldg|building|room|rm|dept)\b", lines[-1], re.I):
+        town = lines[-1]
+        trial = dict(a, street="\n".join(lines[:-1]), city=town)
+        got = None
+        if lookup:
+            try:
+                got = census(trial)
+            except Exception as e:
+                log.warning("address lookup failed: %s", e)
+        if got and (got.get("city") or "").lower() == town.lower():
+            a = trial
+            how.append(f"took the city “{town}” out of the street box (Census confirmed it)")
+        else:
+            a = trial
+            how.append(f"took “{town}” out of the street box as the city (not confirmed: check it)")
+            confident = False
     if lookup and needs_lookup(a):
         try:
             got = census(a)
@@ -201,4 +220,6 @@ def fix(a, lookup=True):
         else:
             how.append("no match found: fill in by hand if you like")
             confident = False
+    if (a.get("street") or "").strip() and not all((a.get(k) or "").strip() for k in ("city", "region", "postal")):
+        confident = False                            # still incomplete: let the owner look first
     return a, how, confident
