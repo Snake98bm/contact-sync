@@ -12,6 +12,15 @@ def _clean(s):
     return " ".join((s or "").split())
 
 
+def pick_name(shown, given, family, company, middle=""):
+    """The person's name as 'First Middle Last'. A shown name in 'Last, First' form (left by some
+    sync tools) is rebuilt from the name fields. No person name: the company name."""
+    shown, parts = _clean(shown), _clean(f"{given or ''} {middle or ''} {family or ''}")
+    if shown and not (", " in shown and parts):
+        return shown
+    return parts or shown or _clean(company)
+
+
 def from_graph(c):
     phones = [{"value": p, "type": "work"} for p in c.get("businessPhones") or []]
     phones += [{"value": p, "type": "home"} for p in c.get("homePhones") or []]
@@ -25,12 +34,13 @@ def from_graph(c):
         if line:
             addrs.append(line)
     given, family = _clean(c.get("givenName")), _clean(c.get("surname"))
-    name = _clean(c.get("displayName")) or _clean(f"{given} {family}")
+    name = pick_name(c.get("displayName"), given, family, c.get("companyName"), c.get("middleName"))
     groups = list(c.get("categories") or [])
     if c.get("_folder") and c["_folder"] != "Contacts":
         groups.append("Folder: " + c["_folder"])
     return {
-        "side": "microsoft", "id": c["id"], "name": name, "given": given, "family": family,
+        "side": "microsoft", "id": c["id"], "name": name, "shown_as": _clean(c.get("displayName")),
+        "given": given, "family": family,
         "company": _clean(c.get("companyName")), "title": _clean(c.get("jobTitle")),
         "emails": [e["address"].strip() for e in c.get("emailAddresses") or [] if (e.get("address") or "").strip()],
         "phones": [p for p in phones if _clean(p["value"])],
@@ -61,8 +71,9 @@ def from_people(p, group_names):
         if s.get("type") == "CONTACT":
             updated = s.get("updateTime", "")
     return {
-        "side": "google", "id": p["resourceName"], "name": _clean(n.get("displayName")) or _clean(f"{given} {family}"),
-        "given": given, "family": family,
+        "side": "google", "id": p["resourceName"],
+        "name": pick_name(n.get("displayName"), given, family, org.get("name"), n.get("middleName")),
+        "shown_as": _clean(n.get("displayName")), "given": given, "family": family,
         "company": _clean(org.get("name")), "title": _clean(org.get("title")),
         "emails": [e["value"].strip() for e in p.get("emailAddresses") or [] if (e.get("value") or "").strip()],
         "phones": [{"value": ph["value"], "type": (ph.get("type") or "other").lower()}

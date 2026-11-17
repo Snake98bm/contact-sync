@@ -51,6 +51,16 @@ def test_people():
     assert c["notes"] == "Line one\nLine two" and c["updated"].startswith("2026-02-02")
 
 
+def test_pick_name():
+    assert model.pick_name("Example, Greg", "Greg", "Example", "") == "Greg Example"
+    assert model.pick_name("Jane Example", "Jane", "Example", "") == "Jane Example"
+    assert model.pick_name("", "", "", "Example Plumbing") == "Example Plumbing"
+    assert model.pick_name("Example, Inc", "", "", "") == "Example, Inc"      # no parts to rebuild from
+    p = dict(PERSON, names=[{"displayName": "Sample, John", "givenName": "John", "familyName": "Sample"}])
+    c = model.from_people(p, {})
+    assert c["name"] == "John Sample" and c["shown_as"] == "Sample, John"
+
+
 def test_vcard():
     v = backup.vcard(model.from_people(PERSON, {}))
     assert v.startswith("BEGIN:VCARD\r\n") and v.endswith("END:VCARD\r\n")

@@ -255,7 +255,10 @@ def _tiles(r):
          ("Duplicate groups", c["dup_groups"], "#duplicates"), ("Extra copies", c["dup_extra"], "#duplicates"),
          ("Possible matches", c["possible"], "#possible"), ("Junk", c["junk"], "#junk"),
          ("Phone fixes", c["phone_fixes"], "#phones"), ("Unreadable phones", c["phone_unknown"], "#phones"),
-         ("Name fixes", c["name_fixes"], "#names"), ("Old sync-tool notes", c["sync_tool_contacts"], "#synctool")]
+         ("Name fixes", c["name_fixes"], "#names"), ("Old sync-tool notes", c["sync_tool_contacts"], "#synctool"),
+         ("“Contact Imported” blocks", c.get("import_blocks", 0), "#imported"),
+         ("“Last, First” names", c.get("name_order", 0), "#nameorder"),
+         ("Shared phones/emails", c.get("shared_info", 0), "#shared")]
     return '<div class="tiles">' + "".join(
         (f'<a class="tile" href="/report{h}">' if h else '<div class="tile">') + f"<b>{n}</b><span>{esc(lbl)}</span>"
         + ("</a>" if h else "</div>") for lbl, n, h in t) + "</div>"
@@ -305,6 +308,23 @@ def report_page(r):
                       "Note lines that look like they were written by a sync tool (SyncGene and similar). "
                       "Numbers and ids are shown as #. These get stripped in the cleanup; your own notes stay.",
                       rows, ["Line pattern", "Contacts"]))
+    rows = [f"<td>{_who(i['contact'])}</td><td>{'yes' if i['keeps_text'] else ''}</td>"
+            f"<td>{pill('no address field', 'warn') if i['no_address'] else 'already in the fields'}</td>"
+            for i in r.get("import_blocks", [])]
+    b.append(_section("imported", "“Contact Imported” blocks in notes",
+                      "A dashed line, “Contact Imported:” and “Home Street : …” lines appended by an older import or "
+                      "sync tool. The cleanup removes the block. Your own text above it stays, and an address that "
+                      "isn't in the address fields yet is moved there first.",
+                      rows, ["Contact", "Has your own notes too", "Address"]))
+    rows = [f"<td>{pill(*SIDE[f['contact']['side']])}</td><td>{esc(f['old'])}</td><td>{esc(f['new'])}</td>"
+            for f in r.get("name_order", [])]
+    b.append(_section("nameorder", "Names stored as “Last, First”",
+                      "Rebuilt from the first and last name fields.", rows, ["Side", "Now", "Would become"]))
+    rows = [f"<td>{esc(s['kind'])}: {esc(s['value'])}</td><td>"
+            + "".join(f"<div>{_who(c)}</div>" for c in s["contacts"]) + "</td>" for s in r.get("shared_info", [])]
+    b.append(_section("shared", "Phones and emails shared by different people",
+                      "A household line or a business number on more than one person. These are <b>not</b> merged.",
+                      rows, ["Shared", "Contacts"]))
     rows = [f"<td>{esc(line)}</td><td class='num'>{n}</td>" for line, n in r["repeated_note_lines"]]
     b.append(_section("repeated", "Note lines repeated in 5+ contacts",
                       "Lines that appear in many contacts are usually written by a tool, not by you. "

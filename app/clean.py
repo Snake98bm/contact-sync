@@ -2,11 +2,17 @@
 would do: formatting fixes, duplicates, possible matches, junk and leftovers from an older sync
 tool. Nothing here changes any account."""
 import collections
+import difflib
+import html
 import re
 
 NOREPLY = re.compile(r"^(no-?reply|do-?not-?reply|mailer-daemon|notifications?|bounce)[^@]*@", re.I)
 SYNC_TOOL = re.compile(r"sync ?gene|syncgene|synced (by|with|from)|sync id|cira ?apps", re.I)
-EXT = re.compile(r"\s*(?:ext\.?|extension|x|#)\s*(\d{1,6})\s*$", re.I)
+# Block an older sync/import tool appended to notes: a dashed line, "Contact Imported:", then
+# "Field : value" lines for fields it couldn't map (mostly addresses that are also in the address fields).
+IMPORT_BLOCK = re.compile(r"-{10,}[ \t]*\r?\n[ \t]*Contact Imported:?.*\Z", re.S | re.I)
+EXT = re.compile(r"\s*(?:ext\.?|extension|x|#|;|,)\s*(\d{1,6})\s*$", re.I)
+TITLES = {"dr", "mr", "mrs", "ms", "miss", "prof", "rev", "sir"}
 CALLING_CODES = {"US": "1", "CA": "1", "GB": "44", "AU": "61", "NZ": "64", "IE": "353", "MX": "52"}
 
 
@@ -55,10 +61,12 @@ def pretty_phone(e164, ext=""):
 
 
 def fix_name(name):
-    """ALL CAPS or all lower case -> Title Case. Mixed case is left alone (McDonald, DeAngelo)."""
-    n = " ".join((name or "").split())
+    """Web-page codes (&amp;) back to characters; ALL CAPS or all lower case -> Title Case for
+    names of two or more words. Mixed case is left alone (McDonald, DeAngelo), and so are single
+    words, which are often brands (USAA, directv)."""
+    n = " ".join(html.unescape(name or "").split())
     letters = [c for c in n if c.isalpha()]
-    if len(letters) < 2 or not (n.isupper() or n.islower()):
+    if len(letters) < 2 or len(n.split(" ")) < 2 or not (n.isupper() or n.islower()):
         return n
     words = []
     for w in n.lower().split(" "):
@@ -73,6 +81,31 @@ def name_key(c):
     n = re.sub(r"[^a-z0-9 ]", "", fix_name(c["name"]).lower())
     n = " ".join(n.split())
     return n if len(n) >= 3 else ""
+
+
+def names_match(a, b):
+    """Could two contacts be the same person? Yes if either has no name, one name contains the
+    other, or the first names agree (titles like Dr ignored). A shared phone or email between
+    'Jane Example' and 'John Example' (a household line) is not enough."""
+    ka, kb = name_key(a), name_key(b)
+    if not ka or not kb or ka == kb or ka in kb or kb in ka:
+        return True
+    fa = [t for t in ka.split() if t not in TITLES]
+    fb = [t for t in kb.split() if t not in TITLES]
+    if not (fa and fb):
+        return False
+    if fa[0] == fb[0]:
+        return True
+    # spelling variants of the first name (Micheal / Michael) when the rest of the name agrees
+    return fa[1:] == fb[1:] and len(fa) > 1 and difflib.SequenceMatcher(None, fa[0], fb[0]).ratio() >= 0.75
+
+
+def split_import_block(notes):
+    """(your own text, the tool's block or '')."""
+    m = IMPORT_BLOCK.search(notes or "")
+    if not m:
+        return (notes or "").strip(), ""
+    return notes[:m.start()].strip(), m.group(0)
 
 
 def keys(c, region="US"):
@@ -121,15 +154,18 @@ def analyse(contacts, region="US"):
     """contacts: both sides in the common shape. Returns the report dict."""
     by_id = {(c["side"], c["id"]): c for c in contacts}
     uf = _UF()
-    owner = {}
+    holders = collections.defaultdict(list)       # email/phone -> contacts that have it
+    shared = {}                                   # different people sharing an email/phone
     for c in contacts:
         node = (c["side"], c["id"])
         uf.find(node)
         for k in keys(c, region):
-            if k in owner:
-                uf.union(node, owner[k])
-            else:
-                owner[k] = node
+            for other in holders[k]:
+                if names_match(c, by_id[other]):
+                    uf.union(node, other)
+                else:
+                    shared.setdefault(k, set()).update({node, other})
+            holders[k].append(node)
 
     groups = collections.defaultdict(list)
     for node in by_id:
@@ -143,15 +179,44 @@ def analyse(contacts, region="US"):
         people.append({"members": cs, "ms": len(ms), "google": len(gg),
                        "name": max((fix_name(c["name"]) for c in cs), key=len, default="")})
 
-    # possible matches: different people with the same name and nothing shared
+    # possible matches: someone missing on one side who has the same name as someone else
+    # (often the same person with an unreadable or changed phone)
     by_name = collections.defaultdict(list)
     for i, p in enumerate(people):
         for nk in {name_key(c) for c in p["members"]} - {""}:
             by_name[nk].append(i)
     possible = []
     for nk, idx in by_name.items():
-        if len(set(idx)) > 1:
-            possible.append({"name": nk, "people": [people[i] for i in sorted(set(idx))]})
+        idx = sorted(set(idx))
+        if len(idx) > 1 and any(people[i]["ms"] == 0 or people[i]["google"] == 0 for i in idx):
+            possible.append({"name": nk, "people": [people[i] for i in idx]})
+
+    # household/business lines: one phone or email on contacts that are clearly different people
+    person_of = {(c["side"], c["id"]): i for i, p in enumerate(people) for c in p["members"]}
+    shared_info, seen_pairs = [], set()
+    for k, nodes in shared.items():
+        kind, _, value = k.partition(":")
+        shared_info.append({"kind": kind, "value": value, "contacts": [by_id[n] for n in sorted(nodes)]})
+        # ...but a one-sided contact in Microsoft and a one-sided one in Google with the same number is
+        # probably one contact renamed on one side
+        idx = {person_of[n] for n in nodes}
+        only_m = [i for i in idx if people[i]["google"] == 0]
+        only_g = [i for i in idx if people[i]["ms"] == 0]
+        for a in only_m:
+            for b in only_g:
+                if (a, b) not in seen_pairs:
+                    seen_pairs.add((a, b))
+                    possible.append({"name": f"same {kind}, names differ", "people": [people[a], people[b]]})
+
+    # notes blocks left by an older import/sync tool, and names stored as "Last, First"
+    import_blocks, name_order = [], []
+    for c in contacts:
+        own, block = split_import_block(c["notes"])
+        if block:
+            import_blocks.append({"contact": c, "keeps_text": bool(own), "no_address": not c["addresses"],
+                                  "block": block[:400]})
+        if ", " in c.get("shown_as", "") and c["name"] != c.get("shown_as"):
+            name_order.append({"contact": c, "old": c["shown_as"], "new": c["name"]})
 
     # formatting
     phone_fixes, phone_unknown, name_fixes, email_fixes = [], [], [], []
@@ -173,7 +238,8 @@ def analyse(contacts, region="US"):
     tool_contacts = []
     line_count = collections.Counter()
     for c in contacts:
-        lines = {ln.strip() for ln in c["notes"].splitlines() if ln.strip()}
+        own_text = split_import_block(c["notes"])[0]   # the import block is reported on its own
+        lines = {ln.strip() for ln in own_text.splitlines() if ln.strip()}
         for ln in lines:
             line_count[_shape(ln)] += 1
         hits = [ln for ln in lines if SYNC_TOOL.search(ln)]
@@ -199,7 +265,10 @@ def analyse(contacts, region="US"):
             "phone_fixes": len(phone_fixes), "phone_unknown": len(phone_unknown),
             "name_fixes": len(name_fixes), "email_fixes": len(email_fixes),
             "sync_tool_contacts": len(tool_contacts),
+            "import_blocks": len(import_blocks), "name_order": len(name_order),
+            "shared_info": len(shared_info),
         },
+        "import_blocks": import_blocks, "name_order": name_order, "shared_info": shared_info,
         "duplicates": sorted((p for p in people if p["ms"] > 1 or p["google"] > 1),
                              key=lambda p: -(p["ms"] + p["google"])),
         "only_ms": [p for p in people if p["google"] == 0],
