@@ -104,10 +104,14 @@ def tidy(c, region="US"):
         e164, ext = clean.norm_phone(p["value"], region)
         v = clean.pretty_phone(e164, ext) if e164 else p["value"]
         key = (e164, ext) if e164 else " ".join(p["value"].split()).lower()
-        if any(((clean.norm_phone(x["value"], region)[0], clean.norm_phone(x["value"], region)[1])
-                if clean.norm_phone(x["value"], region)[0] else " ".join(x["value"].split()).lower()) == key
-               for x in phones):
-            dupes += 1                                       # same number listed twice: keep the first
+        same = next((x for x in phones
+                     if ((clean.norm_phone(x["value"], region)[0], clean.norm_phone(x["value"], region)[1])
+                         if clean.norm_phone(x["value"], region)[0] else " ".join(x["value"].split()).lower())
+                     == key), None)
+        if same is not None:
+            dupes += 1                       # same number listed twice: one row, with the best label
+            if phone_rank(p.get("type")) < phone_rank(same.get("type")):
+                same["type"] = p.get("type")
             continue
         reformatted |= v != p["value"]
         phones.append(dict(p, value=v))
@@ -135,6 +139,18 @@ def tidy(c, region="US"):
     return rec, [r for r in reasons if not r.startswith("keep")], [r for r in reasons if r.startswith("keep")]
 
 
+def phone_rank(phone_type):
+    """Which label wins when one number is listed more than once (owner's order): mobile, work, other, home."""
+    t = (phone_type or "other").lower()
+    if "mobile" in t or t in ("cell", "iphone"):
+        return 0
+    if t.startswith("work") or t in ("business", "main", "company"):
+        return 1
+    if t.startswith("home"):
+        return 3
+    return 2
+
+
 def combine_recs(recs, region="US"):
     """One record holding everything from several copies of the same person."""
     if len(recs) == 1:
@@ -153,8 +169,11 @@ def combine_recs(recs, region="US"):
                 emails.append(e)
         for p in r.get("phones") or []:
             key = clean.norm_phone(p["value"], region)[0] or p["value"]
-            if key not in [clean.norm_phone(x["value"], region)[0] or x["value"] for x in phones]:
-                phones.append(p)
+            same = next((x for x in phones if (clean.norm_phone(x["value"], region)[0] or x["value"]) == key), None)
+            if same is None:
+                phones.append(dict(p))
+            elif phone_rank(p.get("type")) < phone_rank(same.get("type")):
+                same["type"] = p.get("type")
         for a in r.get("addr") or []:
             if model.addr_line(a).lower() not in [model.addr_line(x).lower() for x in addr]:
                 addr.append(a)

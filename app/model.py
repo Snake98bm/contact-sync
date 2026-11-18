@@ -195,7 +195,11 @@ def to_graph(rec, base=None):
         warn.append("Outlook keeps 2 home and 2 business phones; extra numbers left out")
     body = {
         "givenName": rec.get("given") or None, "middleName": rec.get("middle") or None,
-        "surname": rec.get("family") or None, "displayName": display_name(rec) or None,
+        "surname": rec.get("family") or None,
+        # Only a person's name goes in displayName. A company-only contact keeps it empty, like Outlook
+        # makes it: with the company there, iPhones show the Outlook copy as a person and the Google
+        # copy as a company, and list the contact twice.
+        "displayName": _clean(f"{rec.get('given') or ''} {rec.get('middle') or ''} {rec.get('family') or ''}"),
         "companyName": rec.get("company") or None, "jobTitle": rec.get("title") or None,
         "emailAddresses": [{"address": e, "name": names.get(e.lower()) or e} for e in emails[:3]],
         "mobilePhone": mobile[0] if mobile else None, "homePhones": home[:2], "businessPhones": business[:2],

@@ -284,6 +284,19 @@ def test_cleanup():
     assert not writer.busy["cleanup"]
 
 
+def test_repeated_number_keeps_best_label():
+    c = {"side": "microsoft", "id": "x", "given": "Pat", "family": "Example", "emails": [], "addr": [], "notes": "",
+         "phones": [{"value": "+15555550123", "type": "home"}, {"value": "(555) 555-0123", "type": "mobile"},
+                    {"value": "(555) 555-0188", "type": "other"}, {"value": "555-555-0188", "type": "work"}]}
+    rec, reasons, _ = cleanup.tidy(c)
+    assert [(p["value"], p["type"]) for p in rec["phones"]] == [("(555) 555-0123", "mobile"),
+                                                                 ("(555) 555-0188", "work")]
+    assert "remove duplicate phones" in reasons
+    both = cleanup.combine_recs([{"phones": [{"value": "(555) 555-0123", "type": "home"}]},
+                                 {"phones": [{"value": "+15555550123", "type": "other"}]}])
+    assert both["phones"] == [{"value": "(555) 555-0123", "type": "other"}]
+
+
 def test_shared_number_marked_right():
     mode("on")
     ms("AAM-cara", "Cara", "Sample", "cara@example.com", "(559) 555-0777")

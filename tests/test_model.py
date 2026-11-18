@@ -44,6 +44,13 @@ def test_graph():
     assert c["birthday"] == "1980-02-03" and c["groups"] == ["Family", "Folder: Contacts/Work"]
 
 
+def test_graph_company_only_display_name():
+    body, _ = model.to_graph({"company": "Example Plumbing", "phones": []})
+    assert body["displayName"] == "" and body["companyName"] == "Example Plumbing"
+    body, _ = model.to_graph({"given": "Jane", "family": "Example", "company": "Example Plumbing"})
+    assert body["displayName"] == "Jane Example"
+
+
 def test_people():
     c = model.from_people(PERSON, {"contactGroups/abc": "Friends"})
     assert c["name"] == "John Sample" and c["company"] == "Sample LLC"
