@@ -240,9 +240,9 @@ def test_cleanup():
     assert info["reason"] == "before cleanup" and info["contacts"] > 0 and "report.json" not in backup.listing()[0]["files"], info
     g = G["people/c-greg"]
     assert g["biographies"][0]["value"] == "Gate code 12", g["biographies"]
-    assert [p["value"] for p in g["phoneNumbers"]] == ["(559) 555-1234"], g["phoneNumbers"]
+    assert [p["value"] for p in g["phoneNumbers"]] == ["+1 (559) 555-1234"], g["phoneNumbers"]
     assert g["names"][0]["displayName"] == "Greg Example", g["names"]      # really shown as First Last
-    assert MS["AAM-greg"]["personalNotes"] == "Gate code 12" and MS["AAM-greg"]["mobilePhone"] == "(559) 555-1234"
+    assert MS["AAM-greg"]["personalNotes"] == "Gate code 12" and MS["AAM-greg"]["mobilePhone"] == "+1 (559) 555-1234"
     assert MS["AAM-greg"]["emailAddresses"][0]["address"] == "greg@example.com"
     assert MS["AAM-greg"]["homeAddress"]["postalCode"] == "90000" and g["addresses"][0]["postalCode"] == "90000"
     sa = MS["AAM-solo"]["homeAddress"]
@@ -258,7 +258,7 @@ def test_cleanup():
     solo_g = [p for p in G.values() if (p.get("names") or [{}])[0].get("givenName") == "Solo"]
     assert len(solo_g) == 1 and store.q("SELECT 1 FROM links WHERE ms_id='AAM-solo'")
     assert "AAM-a" in MS and "AAM-b" in MS
-    assert MS["AAM-a"]["mobilePhone"] == "(559) 555-0300" and G["people/c-a"]["phoneNumbers"]   # Anna keeps it
+    assert MS["AAM-a"]["mobilePhone"] == "+1 (559) 555-0300" and G["people/c-a"]["phoneNumbers"]   # Anna keeps it
     assert not MS["AAM-b"].get("mobilePhone") and not G["people/c-b"]["phoneNumbers"]            # removed from Bob
     assert MS["AAM-b"]["emailAddresses"][0]["address"] == "bob@example.com"                      # nothing else lost
     lisas = [c for c in MS.values() if c.get("givenName") == "Lisa"]
@@ -289,8 +289,8 @@ def test_repeated_number_keeps_best_label():
          "phones": [{"value": "+15555550123", "type": "home"}, {"value": "(555) 555-0123", "type": "mobile"},
                     {"value": "(555) 555-0188", "type": "other"}, {"value": "555-555-0188", "type": "work"}]}
     rec, reasons, _ = cleanup.tidy(c)
-    assert [(p["value"], p["type"]) for p in rec["phones"]] == [("(555) 555-0123", "mobile"),
-                                                                 ("(555) 555-0188", "work")]
+    assert [(p["value"], p["type"]) for p in rec["phones"]] == [("+1 (555) 555-0123", "mobile"),
+                                                                 ("+1 (555) 555-0188", "work")]
     assert "remove duplicate phones" in reasons
     both = cleanup.combine_recs([{"phones": [{"value": "(555) 555-0123", "type": "home"}]},
                                  {"phones": [{"value": "+15555550123", "type": "other"}]}])

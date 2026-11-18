@@ -2,7 +2,7 @@
 
 Plan (built from a fresh read of both accounts):
 - tidy:    per contact: remove the "Contact Imported" notes block, rebuild "Last, First" names,
-           phones as (559) 555-1234, lowercase emails, decode &amp; and similar codes.
+           phones as +1 (559) 555-1234, lowercase emails, decode &amp; and similar codes.
 - combine: one person with copies to merge (duplicates on a side, and/or a one-sided contact
            in each account that is the same person): every email, phone, address and note is
            kept, one copy per side remains, extra copies go to the recycle bin, and the two sides

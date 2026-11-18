@@ -24,8 +24,8 @@ def test_phones():
     assert n("+44 20 7946 0000") == ("+442079460000", "")
     assert n("555-0100")[0] is None                       # too short to be sure
     assert n("020 7946 0000", "GB") == ("+442079460000", "")
-    assert clean.pretty_phone("+15555550100") == "(555) 555-0100"
-    assert clean.pretty_phone("+15555550100", "23") == "(555) 555-0100 x23"
+    assert clean.pretty_phone("+15555550100") == "+1 (555) 555-0100"
+    assert clean.pretty_phone("+15555550100", "23") == "+1 (555) 555-0100 x23"
 
 
 def test_names():
@@ -138,7 +138,7 @@ def test_analyse():
     assert "555-555-0111" in web.contacts_page(r, "5555550111")             # digits-only phone search
     jane = next(p for p in r["people"] if p["name"] == "Jane Example")
     assert 'class="diff"' in web.contact_page(jane, r)                      # name differs: JANE EXAMPLE
-    assert any(f["new"] == "(555) 555-0100" for f in r["phone_fixes"])
+    assert any(f["new"] == "+1 (555) 555-0100" for f in r["phone_fixes"])
 
 
 if __name__ == "__main__":

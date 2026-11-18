@@ -122,7 +122,7 @@ def test_phone_number_in_company_field_moves_to_phones():
     import cleanup
     x = c("google", "g9", "Casey", "Example", company="5555550199")
     rec, reasons, _ = cleanup.tidy(x)
-    assert rec["company"] == "" and [p["value"] for p in rec["phones"]] == ["(555) 555-0199"], rec
+    assert rec["company"] == "" and [p["value"] for p in rec["phones"]] == ["+1 (555) 555-0199"], rec
     assert "move phone number out of the company field" in reasons
     y = c("google", "g8", "Real", "Company", company="3M Company")
     assert cleanup.tidy(y)[0]["company"] == "3M Company"                # a real company stays

@@ -474,7 +474,7 @@ def prune():
 
 TEST_REC = {"given": "Contact-Sync", "middle": "", "family": "Test", "company": "Example Test Co",
             "title": "", "emails": ["contact-sync-test@example.com"],
-            "phones": [{"value": "(555) 555-0100", "type": "mobile"}],
+            "phones": [{"value": "+1 (555) 555-0100", "type": "mobile"}],
             "addr": [{"type": "home", "street": "1 Example St", "city": "Springfield", "region": "CA",
                       "postal": "90000", "country": "USA"}],
             "birthday": "", "notes": "Made by contact-sync to test writing. Safe to delete."}

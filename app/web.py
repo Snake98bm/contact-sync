@@ -729,7 +729,7 @@ def _phone_row(k, value="", typ="mobile"):
     opts += f'<option value="custom"{" selected" if custom else ""}>Other label…</option>'
     show = "this.nextElementSibling.style.display=this.value==='custom'?'':'none'"
     return (f'<div class="bar phone-row" style="margin:4px 0"><input type="text" name="phone_{k}_num" '
-            f'value="{esc(value)}" placeholder="(559) 555-1234" style="width:180px">'
+            f'value="{esc(value)}" placeholder="+1 (559) 555-1234" style="width:180px">'
             f'<select name="phone_{k}_type" style="{SELECT_STYLE}" onchange="{show}">{opts}</select>'
             f'<input type="text" name="phone_{k}_custom" value="{esc(typ if custom else "")}" '
             f'placeholder="label, e.g. main" style="width:140px{"" if custom else ";display:none"}"></div>')
@@ -1052,7 +1052,7 @@ value is kept in the conflict list below.</li>
 
 KIND_TITLE = {
     "tidy": ("Tidy up contacts", "Remove “Contact Imported” notes blocks, “Last, First” → “First Last”, phones as "
-             "(559) 555-1234, lowercase emails, fix codes like &amp;amp;."),
+             "+1 (559) 555-1234, lowercase emails, fix codes like &amp;amp;."),
     "combine": ("Combine copies of the same person", "Every email, phone, address and note is kept; one copy per "
                 "account remains and extra copies go to the recycle bin; the two accounts are linked for sync. "
                 "Unticked ones need a look: the names differ."),
