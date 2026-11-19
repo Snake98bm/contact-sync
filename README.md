@@ -14,7 +14,7 @@ A small self-hosted Docker container that keeps **Microsoft 365 (Outlook/Exchang
   sign-in for both accounts, contacts, cleanup, sync, recycle bin, backups, settings.
 - **Cleanup** (build a plan, tick what you want, apply). Nothing changes until you press Apply.
   - **Tidy:** "Last, First" names, phone formatting, lowercase emails, notes and repeated addresses
-    left behind by older sync tools.
+    left behind by older sync tools. Any row can instead send that contact (both accounts) to the recycle bin.
   - **Combine** duplicates and link the copies in each account.
   - **Shared phones and emails:** decide per household; you can mark a number as rightly shared.
   - **Fix addresses:**

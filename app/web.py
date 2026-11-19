@@ -1307,10 +1307,17 @@ def cleanup_page(plan, st, write_mode, msg="", error="", people=None):
             names = ", ".join(sorted({m["name"] for m in i["members"] if m["name"]}))
             look = (f" · <a href='/contacts?q={urllib.parse.quote(i['members'][0]['name'] or '')}' target='_blank'>"
                     f"see the copies</a>") if kind == "combine" and i["members"] else ""
-            rows.append(f"<tr><td><input type='checkbox' name='item' value='{i['id']}' class='k-{kind}'"
+            n, tick = i["id"], f"document.getElementById('t{i['id']}').checked=true"
+            # tidy rows: fix it, or send the whole contact (both accounts) to the recycle bin instead
+            do = ("<div class='small rm'>" + "".join(
+                f"<label style='margin-right:14px'><input type='radio' name='tidy_{n}_do' value='{v}'"
+                f"{' checked' if v == 'fix' else ''} onchange=\"{tick}\"> {t}</label>"
+                for v, t in (("fix", "Fix it"), ("delete_contact", "Delete this contact (to the recycle bin)")))
+                + "</div>") if kind == "tidy" else ""
+            rows.append(f"<tr><td><input type='checkbox' name='item' value='{n}' id='t{n}' class='k-{kind}'"
                         f"{' checked' if i['default'] else ''}></td><td>{esc(i['title'])}"
                         + (f"<div class='muted small'>{esc(names)}</div>" if names and names != i['title'] else "")
-                        + (_name_editor(i) if kind == "combine" else "") + _card(i, people or {})
+                        + (_name_editor(i) if kind == "combine" else "") + _card(i, people or {}) + do
                         + f"</td><td>{who}</td><td class='small'>{esc(i['detail'])}{look}</td></tr>")
         b.append(f"<h2>{esc(title)} <span class='muted'>({on} of {len(items)} ticked)</span></h2>"
                  f"<p class='muted small'>{intro} <a href='#' onclick=\"document.querySelectorAll('.k-{kind}')"

@@ -292,10 +292,13 @@ def build_plan(progress=None):
                     f"{LABEL[sync.OTHER[c['side']]]}", [c], True)
 
     # tidy: every contact that needs a fix. Tidy runs first; combine and copy re-read afterwards.
+    def whole(c):                     # every copy of this person (both accounts), for "delete this contact"
+        p = person_of.get((c["side"], c["id"]))
+        return [{"side": x["side"], "id": x["id"], "name": x["name"]} for x in (p["members"] if p else [c])]
     for c in contacts:
         _, reasons, notes = tidy(c, region)
         if reasons:
-            add("tidy", c["name"] or "(no name)", "; ".join(reasons), [c], True, side=c["side"])
+            add("tidy", c["name"] or "(no name)", "; ".join(reasons), [c], True, side=c["side"], person=whole(c))
         elif notes:
             add("tidy", c["name"] or "(no name)", "; ".join(notes) + " — nothing to change", [c], False,
                 side=c["side"], noop=True)
@@ -413,7 +416,8 @@ def choices_from_form(plan_id, f, form_all):
         elif n in ticked:
             if i["kind"] == "combine":
                 out[n] = {"mode": "combine", "name": name}
-            elif i["kind"] == "address" and f(f"addr_{n}_do") == "delete_contact":
+            elif i["kind"] in ("address", "tidy") and f(f"{'addr' if i['kind'] == 'address' else 'tidy'}_{n}_do") \
+                    == "delete_contact":
                 out[n] = {"mode": "delete_contact"}
             elif i["kind"] == "address" and (f(f"addr_{n}_remove") or f(f"addr_{n}_do") == "remove"):
                 out[n] = {"mode": "remove"}
@@ -560,7 +564,24 @@ def _fresh(m):
     return raw, c
 
 
+def _delete_person(item):
+    """The whole person (every copy, both accounts) to the recycle bin; restorable from there."""
+    alive = []
+    for m in item.get("person") or item["members"]:
+        try:
+            _fresh(m)
+            alive.append(m)
+        except Exception:
+            continue                       # already gone (e.g. another row of this person deleted it)
+    if not alive:
+        return ""
+    writer.delete(alive, note="cleanup: contact deleted")
+    return f"contact deleted ({' and '.join(LABEL[m['side']] for m in alive)}), in the recycle bin"
+
+
 def _do_tidy(item, region, _names):
+    if isinstance(item.get("choice"), dict) and item["choice"].get("mode") == "delete_contact":
+        return _delete_person(item)
     m = item["members"][0]
     raw, c = _fresh(m)
     rec, reasons, _ = tidy(c, region)
@@ -628,18 +649,7 @@ def _do_address(item, region, _names):
     if new["region"]:
         new["region"] = addr.state_code(new["region"])
     if choice.get("mode") == "delete_contact":
-        # the whole person (every copy, both accounts) to the recycle bin; restorable from there
-        alive = []
-        for m in item.get("person") or item["members"]:
-            try:
-                _fresh(m)
-                alive.append(m)
-            except Exception:
-                continue                       # already gone (e.g. another row of this person deleted it)
-        if not alive:
-            return ""
-        writer.delete(alive, note="cleanup: contact deleted")
-        return f"contact deleted ({' and '.join(LABEL[m['side']] for m in alive)}), in the recycle bin"
+        return _delete_person(item)
     done = []
     for m in item["members"]:
         try:

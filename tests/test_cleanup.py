@@ -394,6 +394,30 @@ def test_address_typed_two_ways_is_one_row():
     assert cleanup._do_address(dict(rows[0], choice=choice[rows[0]["id"]]), "US", {}) == ""   # already gone: no error
 
 
+def test_tidy_row_can_delete_the_contact():
+    mode("on")
+    ms("AAM-tess", "Tess", "Example", "Tess@Example.com", "(559) 555-0700")
+    gg("people/c-tess", "Tess", "Example", "tess@example.com", ["(559) 555-0700"], shown="Example, Tess")
+    rows = [i for i in cleanup.build_plan()["items"] if i["kind"] == "tidy" and i["title"] == "Tess Example"]
+    assert rows, "no tidy row for Tess"
+    row = rows[0]
+    assert {(m["side"], m["id"]) for m in row["person"]} == {("microsoft", "AAM-tess"), ("google", "people/c-tess")}
+    plan_id = cleanup.latest_plan()["plan_id"]
+    # left on "Fix it": a plain tidy
+    choice = cleanup.choices_from_form(plan_id, {}.get, lambda k: [str(row["id"])] if k == "item" else [])
+    assert choice[row["id"]] is True, choice
+    # "Delete this contact": every copy, both accounts, to the recycle bin
+    form = {f"tidy_{row['id']}_do": "delete_contact"}
+    choice = cleanup.choices_from_form(plan_id, form.get, lambda k: [str(row["id"])] if k == "item" else [])
+    assert choice[row["id"]] == {"mode": "delete_contact"}, choice
+    msg = cleanup._do_tidy(dict(row, choice=choice[row["id"]]), "US", {})
+    assert "AAM-tess" not in MS and "people/c-tess" not in G and "recycle bin" in msg, msg
+    assert any(b["name"] == "Tess Example" for b in writer.bin_items())
+    assert cleanup._do_tidy(dict(row, choice=choice[row["id"]]), "US", {}) == ""     # already gone: no error
+    # not ticked: nothing happens, whatever the radio says
+    assert row["id"] not in cleanup.choices_from_form(plan_id, form.get, lambda k: [])
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

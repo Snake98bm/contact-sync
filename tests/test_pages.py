@@ -162,6 +162,9 @@ def test_cleanup_rows_show_the_card():
     h = web.cleanup_page(plan, st, "on", people=people)
     assert h.count("Show card") == 3 and h.count("/contacts/abcdef012345") == 3, h.count("Show card")
     assert "Address (Work)" in h and "Springfeld" in h and "a note" in h
+    # tidy rows offer "Delete this contact"; address rows keep theirs
+    assert "name='tidy_2_do' value='delete_contact'" in h and "name='addr_1_do' value='delete_contact'" in h
+    assert "name='tidy_1_do'" not in h and "name='tidy_3_do'" not in h
 
 
 def test_phone_rows_on_the_edit_page():
