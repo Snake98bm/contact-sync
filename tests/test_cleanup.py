@@ -418,6 +418,19 @@ def test_tidy_row_can_delete_the_contact():
     assert row["id"] not in cleanup.choices_from_form(plan_id, form.get, lambda k: [])
 
 
+def test_old_plan_row_delete_takes_the_linked_copy_too():
+    """A row from a plan built before rows listed the whole person names only one copy."""
+    mode("on")
+    ms("AAM-rex", "Rex", "Example", None, "(559) 555-0710")
+    gg("people/c-rex", "Rex", "Example", None, ["(559) 555-0710"], shown="Example, Rex")
+    store.x("INSERT INTO links(ms_id, g_id, name) VALUES(?,?,?)", ("AAM-rex", "people/c-rex", "Rex Example"))
+    row = {"kind": "tidy", "title": "Example, Rex", "choice": {"mode": "delete_contact"},
+           "members": [{"side": "google", "id": "people/c-rex", "name": "Example, Rex"}]}
+    msg = cleanup._do_tidy(row, "US", {})
+    assert "AAM-rex" not in MS and "people/c-rex" not in G, msg
+    assert "Microsoft 365 and Google" in msg or "Google and Microsoft 365" in msg, msg
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

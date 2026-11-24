@@ -566,8 +566,14 @@ def _fresh(m):
 
 def _delete_person(item):
     """The whole person (every copy, both accounts) to the recycle bin; restorable from there."""
-    alive = []
-    for m in item.get("person") or item["members"]:
+    alive, who = [], list(item.get("person") or item["members"])
+    for m in list(who):        # a row from an older plan lists one copy: add its linked copy in the other account
+        col, other = ("ms_id", "g_id") if m["side"] == "microsoft" else ("g_id", "ms_id")
+        for lk in store.q(f"SELECT {other} AS oid FROM links WHERE {col}=?", (m["id"],)):
+            side = sync.OTHER[m["side"]]
+            if lk["oid"] and not any(x["side"] == side and x["id"] == lk["oid"] for x in who):
+                who.append({"side": side, "id": lk["oid"], "name": m.get("name", "")})
+    for m in who:
         try:
             _fresh(m)
             alive.append(m)
